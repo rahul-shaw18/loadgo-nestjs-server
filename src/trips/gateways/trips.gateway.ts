@@ -85,13 +85,19 @@ export class TripsGateway
       const res = await fetch(
         `${BACKEND_BASE_URL}verify-driver?driverId=${driverId}`,
       );
-      const data = await res.json();
-      if (data?.activeTripId) {
-        client.join(this.connectionManager.tripRoom(data.activeTripId));
-        this.logger.log(
-          `Driver ${driverId} verified with active trip ${data.activeTripId}`,
+      if (!res.ok) {
+        this.logger.warn(
+          `verify-driver returned HTTP ${res.status} for driver ${driverId}`,
         );
-        return;
+      } else {
+        const data = await res.json();
+        if (data?.activeTripId) {
+          client.join(this.connectionManager.tripRoom(data.activeTripId));
+          this.logger.log(
+            `Driver ${driverId} verified with active trip ${data.activeTripId}`,
+          );
+          return;
+        }
       }
     } catch (err) {
       this.logger.error(`Failed to verify driver ${driverId}: ${err.message}`);
@@ -99,18 +105,24 @@ export class TripsGateway
 
     try {
       const res = await fetch(`${BACKEND_BASE_URL}searching-trips`);
-      const searchingTrips = await res.json();
-
-      if (Array.isArray(searchingTrips) && searchingTrips.length > 0) {
-        this.logger.log(
-          `Found ${searchingTrips.length} searching trip(s) for driver ${driverId}`,
+      if (!res.ok) {
+        this.logger.warn(
+          `searching-trips returned HTTP ${res.status}`,
         );
-        searchingTrips.forEach((trip) => {
-          this.driverQueue.addTripToDriver(driverId, trip.id);
-        });
-        this.offerManager.offerNextTrip(this.server, driverId);
       } else {
-        this.logger.log(`No searching trips available for driver ${driverId}`);
+        const searchingTrips = await res.json();
+
+        if (Array.isArray(searchingTrips) && searchingTrips.length > 0) {
+          this.logger.log(
+            `Found ${searchingTrips.length} searching trip(s) for driver ${driverId}`,
+          );
+          searchingTrips.forEach((trip) => {
+            this.driverQueue.addTripToDriver(driverId, trip.id);
+          });
+          this.offerManager.offerNextTrip(this.server, driverId);
+        } else {
+          this.logger.log(`No searching trips available for driver ${driverId}`);
+        }
       }
     } catch (err) {
       this.logger.error(`Failed to fetch searching trips: ${err.message}`);
@@ -139,12 +151,18 @@ export class TripsGateway
       const res = await fetch(
         `${BACKEND_BASE_URL}verify-user?userId=${userId}`,
       );
-      const data = await res.json();
-      if (data?.activeTripId) {
-        client.join(this.connectionManager.tripRoom(data.activeTripId));
-        this.logger.log(
-          `User ${userId} verified with active trip ${data.activeTripId}`,
+      if (!res.ok) {
+        this.logger.warn(
+          `verify-user returned HTTP ${res.status} for user ${userId}`,
         );
+      } else {
+        const data = await res.json();
+        if (data?.activeTripId) {
+          client.join(this.connectionManager.tripRoom(data.activeTripId));
+          this.logger.log(
+            `User ${userId} verified with active trip ${data.activeTripId}`,
+          );
+        }
       }
     } catch (err) {
       this.logger.error(`Failed to verify user ${userId}: ${err.message}`);
@@ -176,6 +194,14 @@ export class TripsGateway
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tripId, driverId }),
       });
+      if (!res.ok) {
+        this.logger.warn(
+          `accept-trip returned HTTP ${res.status} for trip ${tripId}`,
+        );
+        this.driverQueue.removeTripFromDriver(driverId, tripId);
+        this.offerManager.offerNextTrip(this.server, driverId);
+        return;
+      }
       const data = await res.json();
 
       if (data?.success) {
