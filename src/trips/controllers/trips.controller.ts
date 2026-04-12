@@ -7,6 +7,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { DriverQueueService } from '../services/driver-queue.service';
 import { OfferManagerService } from '../services/offer-manager.service';
 import { ConnectionManagerService } from '../services/connection-manager.service';
@@ -25,6 +26,7 @@ const STATUS = {
   REQUEST_TIMEOUT: 8,
 };
 
+@ApiTags('Trips')
 @Controller()
 export class TripsController {
   private readonly logger = new Logger(TripsController.name);
@@ -37,6 +39,15 @@ export class TripsController {
   ) {}
 
   @Post('notify-new-trip')
+  @ApiOperation({
+    summary: 'Notify drivers about a new trip',
+    description:
+      'Called by the main backend when a new trip is created. ' +
+      'Adds the trip to each eligible driver\'s queue and, if the driver has no active offer, ' +
+      'immediately emits an OFFER_TRIP socket event with a 30-second screen timer.',
+  })
+  @ApiBody({ type: NotifyNewTripDto })
+  @ApiResponse({ status: 200, description: 'Trip queued successfully', schema: { example: { ok: true } } })
   notifyNewTrip(@Body() payload: NotifyNewTripDto, @Res() res: Response) {
     const { tripId, drivers } = payload;
     const io = this.tripsGateway.server;
@@ -57,6 +68,21 @@ export class TripsController {
   }
 
   @Post('trip-status-update')
+  @ApiOperation({
+    summary: 'Update trip status and emit socket events',
+    description:
+      'Called by the main backend to transition a trip through its lifecycle. ' +
+      'Status codes: 2=ACCEPTED (joins rooms, emits TRIP_ACCEPTED + CLOSE_RIDE_REQ, cleans queues), ' +
+      '3=REVOKED (cleans queues, emits RIDE_REVOKED), ' +
+      '4=STARTED (emits TRIP_STARTED to room), ' +
+      '5=COMPLETED (emits TRIP_COMPLETED to room), ' +
+      '6=CANCELLED_BY_USER (cleans queues, emits TRIP_CANCELLED + RIDE_CANCEL_BY_USER), ' +
+      '7=CANCELLED_BY_DRIVER (emits TRIP_CANCELLED + RIDE_CANCEL_BY_DRIVER), ' +
+      '8=REQUEST_TIMEOUT (cleans queues, emits RIDE_REVOKED).',
+  })
+  @ApiBody({ type: TripStatusUpdateDto })
+  @ApiResponse({ status: 200, description: 'Status updated successfully', schema: { example: { ok: true } } })
+  @ApiResponse({ status: 400, description: 'Invalid status code', schema: { example: { ok: false, message: 'Invalid status code: 99' } } })
   tripStatusUpdate(@Body() payload: TripStatusUpdateDto, @Res() res: Response) {
     const { status, tripId, driverId, userId } = payload;
     const io = this.tripsGateway.server;
