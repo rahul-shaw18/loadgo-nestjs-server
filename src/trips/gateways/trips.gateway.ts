@@ -78,54 +78,8 @@ export class TripsGateway
     if (tripId) {
       client.join(this.connectionManager.tripRoom(tripId));
       this.logger.log(`Driver ${driverId} rejoined active trip ${tripId}`);
-      return;
-    }
-
-    try {
-      const res = await fetch(
-        `${BACKEND_BASE_URL}verify-driver?driverId=${driverId}`,
-      );
-      if (!res.ok) {
-        this.logger.warn(
-          `verify-driver returned HTTP ${res.status} for driver ${driverId}`,
-        );
-      } else {
-        const data = await res.json();
-        if (data?.activeTripId) {
-          client.join(this.connectionManager.tripRoom(data.activeTripId));
-          this.logger.log(
-            `Driver ${driverId} verified with active trip ${data.activeTripId}`,
-          );
-          return;
-        }
-      }
-    } catch (err) {
-      this.logger.error(`Failed to verify driver ${driverId}: ${err.message}`);
-    }
-
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}searching-trips`);
-      if (!res.ok) {
-        this.logger.warn(
-          `searching-trips returned HTTP ${res.status}`,
-        );
-      } else {
-        const searchingTrips = await res.json();
-
-        if (Array.isArray(searchingTrips) && searchingTrips.length > 0) {
-          this.logger.log(
-            `Found ${searchingTrips.length} searching trip(s) for driver ${driverId}`,
-          );
-          searchingTrips.forEach((trip) => {
-            this.driverQueue.addTripToDriver(driverId, trip.id);
-          });
-          this.offerManager.offerNextTrip(this.server, driverId);
-        } else {
-          this.logger.log(`No searching trips available for driver ${driverId}`);
-        }
-      }
-    } catch (err) {
-      this.logger.error(`Failed to fetch searching trips: ${err.message}`);
+    } else {
+      this.logger.log(`Driver ${driverId} registered (no active trip)`);
     }
   }
 
@@ -145,27 +99,9 @@ export class TripsGateway
 
     if (tripId) {
       client.join(this.connectionManager.tripRoom(tripId));
-    }
-
-    try {
-      const res = await fetch(
-        `${BACKEND_BASE_URL}verify-user?userId=${userId}`,
-      );
-      if (!res.ok) {
-        this.logger.warn(
-          `verify-user returned HTTP ${res.status} for user ${userId}`,
-        );
-      } else {
-        const data = await res.json();
-        if (data?.activeTripId) {
-          client.join(this.connectionManager.tripRoom(data.activeTripId));
-          this.logger.log(
-            `User ${userId} verified with active trip ${data.activeTripId}`,
-          );
-        }
-      }
-    } catch (err) {
-      this.logger.error(`Failed to verify user ${userId}: ${err.message}`);
+      this.logger.log(`User ${userId} joined trip room ${tripId}`);
+    } else {
+      this.logger.log(`User ${userId} registered (no active trip)`);
     }
   }
 
