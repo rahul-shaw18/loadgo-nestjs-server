@@ -127,7 +127,7 @@ export class TripsGateway
 
     try {
       const res = await fetch(`${BACKEND_BASE_URL}patchLiveTripData`, {
-        method: 'POST',
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tripId: numericTripId, driverId }),
       });
