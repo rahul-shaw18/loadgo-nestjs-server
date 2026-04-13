@@ -163,6 +163,9 @@ export class TripsGateway
         );
 
         // Notify all participants in the trip room (User and the accepting Driver)
+        // Ensure driver is in the room before emitting
+        client.join(this.connectionManager.tripRoom(numericTripId));
+
         this.server
           .to(this.connectionManager.tripRoom(numericTripId))
           .emit(EVENTS.TRIP_ACCEPTED, {
