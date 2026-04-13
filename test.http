@@ -1,0 +1,7 @@
+POST https://loadgo-nestjs-server.onrender.com/notify-new-trip
+Content-Type: application/json
+
+{
+  "tripId": 435,
+  "drivers": [11]
+}

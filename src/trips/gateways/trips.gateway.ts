@@ -125,7 +125,7 @@ export class TripsGateway
     }
 
     try {
-      const res = await fetch(`${BACKEND_BASE_URL}accept-trip`, {
+      const res = await fetch(`${BACKEND_BASE_URL}patchLiveTripData`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tripId, driverId }),
