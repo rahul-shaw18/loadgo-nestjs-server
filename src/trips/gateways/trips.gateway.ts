@@ -169,8 +169,10 @@ export class TripsGateway
         this.server
           .to(this.connectionManager.tripRoom(numericTripId))
           .emit(EVENTS.TRIP_ACCEPTED, {
+            ...(typeof data === 'object' ? data : {}),
             tripId: numericTripId,
             driverId: driverId,
+            status: 2, // Ensure status is explicitly marked as ACCEPTED
           });
 
         // Stop offering this trip to other drivers and clear their screen timers
