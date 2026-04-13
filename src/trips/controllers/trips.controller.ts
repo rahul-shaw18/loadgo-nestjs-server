@@ -83,92 +83,100 @@ export class TripsController {
   @ApiBody({ type: TripStatusUpdateDto })
   @ApiResponse({ status: 200, description: 'Status updated successfully', schema: { example: { ok: true } } })
   @ApiResponse({ status: 400, description: 'Invalid status code', schema: { example: { ok: false, message: 'Invalid status code: 99' } } })
-  tripStatusUpdate(@Body() payload: TripStatusUpdateDto, @Res() res: Response) {
-    const { tripId, status, driverId, userId } = payload;
-    const id = Number(tripId);
-    const io = this.tripsGateway.server;
-    const statusCode = Number(status);
+  tripStatusUpdate(@Body() payload: TripStatusUpdateDto) {
+    try {
+      const { tripId, status, driverId, userId } = payload;
+      const io = this.tripsGateway.server;
+      const statusCode = Number(status);
 
-    this.logger.log(`Trip status update: ${statusCode} for trip ${id}`);
+      this.logger.log(`Trip status update: ${statusCode} for trip ${tripId}`);
 
-    switch (statusCode) {
-      case STATUS.ACCEPTED: {
-        this.connectionManager.joinDriverToTripRoom(io, driverId as string | number, id);
-        this.connectionManager.joinUserToTripRoom(io, userId as string | number, id);
+      // Defensive check: ensure socket server is available
+      if (!io) {
+        this.logger.error('Socket.IO server is not initialized in TripsGateway');
+        return { ok: false, message: 'Socket server not ready' };
+      }
 
-        io.to(this.connectionManager.tripRoom(id)).emit(
-          EVENTS.TRIP_ACCEPTED,
-          {
-            id,
-            driverId,
-          },
-        );
+      switch (statusCode) {
+        case STATUS.ACCEPTED: {
+          this.connectionManager.joinDriverToTripRoom(io, driverId as string | number, tripId);
+          this.connectionManager.joinUserToTripRoom(io, userId as string | number, tripId);
 
-        io.emit(EVENTS.CLOSE_RIDE_REQ, { driverId, id });
-        this.driverQueue.removeTripFromAllDrivers(id);
-        this.offerManager.clearAllOffersForTrip(io, id);
-        break;
+          io.to(this.connectionManager.tripRoom(tripId)).emit(
+            EVENTS.TRIP_ACCEPTED,
+            {
+              tripId,
+              driverId,
+            },
+          );
+
+          io.emit(EVENTS.CLOSE_RIDE_REQ, { driverId, tripId });
+          this.driverQueue.removeTripFromAllDrivers(tripId);
+          this.offerManager.clearAllOffersForTrip(io, tripId);
+          break;
+        }
+        case STATUS.REVOKED: {
+          this.driverQueue.removeTripFromAllDrivers(tripId);
+          this.offerManager.clearAllOffersForTrip(io, tripId);
+          io.emit(EVENTS.RIDE_REVOKED, { tripId });
+          break;
+        }
+        case STATUS.STARTED: {
+          io.to(this.connectionManager.tripRoom(tripId)).emit(
+            EVENTS.TRIP_STARTED,
+            {
+              tripId,
+              driverId,
+            },
+          );
+          break;
+        }
+        case STATUS.COMPLETED: {
+          io.to(this.connectionManager.tripRoom(tripId)).emit(
+            EVENTS.TRIP_COMPLETED,
+            {
+              tripId,
+            },
+          );
+          break;
+        }
+        case STATUS.CANCELLED_BY_USER: {
+          this.driverQueue.removeTripFromAllDrivers(tripId);
+          this.offerManager.clearAllOffersForTrip(io, tripId);
+          io.to(this.connectionManager.tripRoom(tripId)).emit(
+            EVENTS.TRIP_CANCELLED,
+            {
+              tripId,
+            },
+          );
+          io.emit(EVENTS.RIDE_CANCEL_BY_USER, { tripId });
+          break;
+        }
+        case STATUS.CANCELLED_BY_DRIVER: {
+          io.to(this.connectionManager.tripRoom(tripId)).emit(
+            EVENTS.TRIP_CANCELLED,
+            {
+              tripId,
+            },
+          );
+          io.emit(EVENTS.RIDE_CANCEL_BY_DRIVER, { tripId });
+          break;
+        }
+        case STATUS.REQUEST_TIMEOUT: {
+          this.driverQueue.removeTripFromAllDrivers(tripId);
+          this.offerManager.clearAllOffersForTrip(io, tripId);
+          io.emit(EVENTS.RIDE_REVOKED, { tripId });
+          break;
+        }
+        default: {
+          return { ok: false, message: `Invalid status code: ${statusCode}` };
+        }
       }
-      case STATUS.REVOKED: {
-        this.driverQueue.removeTripFromAllDrivers(id);
-        this.offerManager.clearAllOffersForTrip(io, id);
-        io.emit(EVENTS.RIDE_REVOKED, { id });
-        break;
-      }
-      case STATUS.STARTED: {
-        io.to(this.connectionManager.tripRoom(id)).emit(
-          EVENTS.TRIP_STARTED,
-          {
-            id,
-            driverId,
-          },
-        );
-        break;
-      }
-      case STATUS.COMPLETED: {
-        io.to(this.connectionManager.tripRoom(id)).emit(
-          EVENTS.TRIP_COMPLETED,
-          {
-            id,
-          },
-        );
-        break;
-      }
-      case STATUS.CANCELLED_BY_USER: {
-        this.driverQueue.removeTripFromAllDrivers(id);
-        this.offerManager.clearAllOffersForTrip(io, id);
-        io.to(this.connectionManager.tripRoom(id)).emit(
-          EVENTS.TRIP_CANCELLED,
-          {
-            id,
-          },
-        );
-        io.emit(EVENTS.RIDE_CANCEL_BY_USER, { id });
-        break;
-      }
-      case STATUS.CANCELLED_BY_DRIVER: {
-        io.to(this.connectionManager.tripRoom(id)).emit(
-          EVENTS.TRIP_CANCELLED,
-          {
-            id,
-          },
-        );
-        io.emit(EVENTS.RIDE_CANCEL_BY_DRIVER, { id });
-        break;
-      }
-      case STATUS.REQUEST_TIMEOUT: {
-        this.driverQueue.removeTripFromAllDrivers(id);
-        this.offerManager.clearAllOffersForTrip(io, id);
-        io.emit(EVENTS.RIDE_REVOKED, { id });
-        break;
-      }
-      default: {
-        return res
-          .status(HttpStatus.BAD_REQUEST)
-          .json({ ok: false, message: `Invalid status code: ${statusCode}` });
-      }
+
+      return { ok: true };
+    } catch (error) {
+      this.logger.error(`Error in tripStatusUpdate: ${error.message}`, error.stack);
+      return { ok: false, message: 'Internal server error processing status update' };
     }
-
-    return res.json({ ok: true });
   }
 }
