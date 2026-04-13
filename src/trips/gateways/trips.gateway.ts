@@ -161,6 +161,17 @@ export class TripsGateway
         this.logger.log(
           `Trip ${numericTripId} accepted by driver ${driverId} — confirmed (Backend: ${data?.message || 'OK'})`,
         );
+
+        // Notify all participants in the trip room (User and the accepting Driver)
+        this.server
+          .to(this.connectionManager.tripRoom(numericTripId))
+          .emit(EVENTS.TRIP_ACCEPTED, {
+            tripId: numericTripId,
+            driverId: driverId,
+          });
+
+        // Stop offering this trip to other drivers and clear their screen timers
+        this.offerManager.clearAllOffersForTrip(this.server, numericTripId);
       } else {
         this.logger.warn(
           `Trip ${numericTripId} accept failed for driver ${driverId}. ` +
