@@ -159,7 +159,7 @@ export class OfferManagerService {
     const id = String(driverId);
     const offer = this.activeOffers[id];
 
-    if (!offer || offer.tripId !== tripId) {
+    if (!offer || Number(offer.tripId) !== Number(tripId)) {
       this.logger.warn(
         `Driver ${id} tried to accept trip ${tripId} ` +
           `but current offer is ${offer ? offer.tripId : 'none'}`,

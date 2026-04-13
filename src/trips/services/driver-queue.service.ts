@@ -41,7 +41,7 @@ export class DriverQueueService {
       this.driverQueues[id] = [];
     }
 
-    if (this.driverQueues[id].some((entry) => entry.tripId === tripId)) {
+    if (this.driverQueues[id].some((entry) => Number(entry.tripId) === Number(tripId))) {
       return false;
     }
 
@@ -62,7 +62,7 @@ export class DriverQueueService {
     const id = String(driverId);
     if (!this.driverQueues[id]) return;
     this.driverQueues[id] = this.driverQueues[id].filter(
-      (entry) => entry.tripId !== tripId,
+      (entry) => Number(entry.tripId) !== Number(tripId),
     );
   }
 
@@ -71,12 +71,12 @@ export class DriverQueueService {
 
     for (const driverId of Object.keys(this.driverQueues)) {
       const hadTrip = this.driverQueues[driverId].some(
-        (entry) => entry.tripId === tripId,
+        (entry) => Number(entry.tripId) === Number(tripId),
       );
 
       if (hadTrip) {
         this.driverQueues[driverId] = this.driverQueues[driverId].filter(
-          (entry) => entry.tripId !== tripId,
+          (entry) => Number(entry.tripId) !== Number(tripId),
         );
         affectedDrivers.push(driverId);
       }
@@ -136,7 +136,7 @@ export class DriverQueueService {
   hasTripInQueue(driverId: string | number, tripId: number): boolean {
     const id = String(driverId);
     if (!this.driverQueues[id]) return false;
-    return this.driverQueues[id].some((entry) => entry.tripId === tripId);
+    return this.driverQueues[id].some((entry) => Number(entry.tripId) === Number(tripId));
   }
 
   clearDriver(driverId: string | number) {
@@ -149,7 +149,7 @@ export class DriverQueueService {
     return Object.keys(this.driverQueues).filter(
       (driverId) =>
         this.driverQueues[driverId] &&
-        this.driverQueues[driverId].some((entry) => entry.tripId === tripId),
+        this.driverQueues[driverId].some((entry) => Number(entry.tripId) === Number(tripId)),
     );
   }
 }

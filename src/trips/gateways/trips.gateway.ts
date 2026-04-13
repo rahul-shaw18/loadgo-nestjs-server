@@ -111,13 +111,14 @@ export class TripsGateway
     @MessageBody() payload: { tripId: number },
   ) {
     const { tripId } = payload;
+    const numericTripId = Number(tripId);
     const driverId = this.findDriverIdBySocket(client.id);
     if (!driverId) {
       this.logger.warn('ACCEPT_OFFER from unknown socket');
       return;
     }
 
-    const result = this.offerManager.handleAccept(driverId, tripId);
+    const result = this.offerManager.handleAccept(driverId, numericTripId);
     if (!result.valid) {
       this.offerManager.clearOffer(driverId);
       this.offerManager.offerNextTrip(this.server, driverId);
@@ -128,13 +129,13 @@ export class TripsGateway
       const res = await fetch(`${BACKEND_BASE_URL}patchLiveTripData`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tripId, driverId }),
+        body: JSON.stringify({ tripId: numericTripId, driverId }),
       });
       if (!res.ok) {
         this.logger.warn(
-          `accept-trip returned HTTP ${res.status} for trip ${tripId}`,
+          `accept-trip returned HTTP ${res.status} for trip ${numericTripId}`,
         );
-        this.driverQueue.removeTripFromDriver(driverId, tripId);
+        this.driverQueue.removeTripFromDriver(driverId, numericTripId);
         this.offerManager.offerNextTrip(this.server, driverId);
         return;
       }
@@ -142,18 +143,18 @@ export class TripsGateway
 
       if (data?.success) {
         this.logger.log(
-          `Trip ${tripId} accepted by driver ${driverId} — confirmed`,
+          `Trip ${numericTripId} accepted by driver ${driverId} — confirmed`,
         );
       } else {
         this.logger.warn(
-          `Trip ${tripId} accept failed for driver ${driverId}: ${data?.message}`,
+          `Trip ${numericTripId} accept failed for driver ${driverId}: ${data?.message}`,
         );
-        this.driverQueue.removeTripFromDriver(driverId, tripId);
+        this.driverQueue.removeTripFromDriver(driverId, numericTripId);
         this.offerManager.offerNextTrip(this.server, driverId);
       }
     } catch (err) {
-      this.logger.error(`Failed to accept trip ${tripId}: ${err.message}`);
-      this.driverQueue.removeTripFromDriver(driverId, tripId);
+      this.logger.error(`Failed to accept trip ${numericTripId}: ${err.message}`);
+      this.driverQueue.removeTripFromDriver(driverId, numericTripId);
       this.offerManager.offerNextTrip(this.server, driverId);
     }
   }
@@ -164,6 +165,7 @@ export class TripsGateway
     @MessageBody() payload: { tripId: number },
   ) {
     const { tripId } = payload;
+    const numericTripId = Number(tripId);
     const driverId = this.findDriverIdBySocket(client.id);
     if (!driverId) {
       this.logger.warn('REJECT_OFFER from unknown socket');
@@ -171,9 +173,9 @@ export class TripsGateway
     }
 
     const offer = this.offerManager.getOffer(driverId);
-    if (!offer || offer.tripId !== tripId) {
+    if (!offer || Number(offer.tripId) !== numericTripId) {
       this.logger.warn(
-        `Driver ${driverId} rejected trip ${tripId} but current offer is ${offer ? offer.tripId : 'none'}`,
+        `Driver ${driverId} rejected trip ${numericTripId} but current offer is ${offer ? offer.tripId : 'none'}`,
       );
       return;
     }
