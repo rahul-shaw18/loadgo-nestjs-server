@@ -18,6 +18,13 @@ export class NotifyNewTripDto {
   @IsArray()
   @IsNotEmpty()
   drivers: (string | number)[];
+  
+  @ApiPropertyOptional({
+    description: 'User ID of the customer who created the trip',
+    example: 'U1',
+  })
+  @IsOptional()
+  userId?: string | number;
 }
 
 export class TripStatusUpdateDto {

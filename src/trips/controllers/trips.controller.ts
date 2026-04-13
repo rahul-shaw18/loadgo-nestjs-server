@@ -49,8 +49,13 @@ export class TripsController {
   @ApiBody({ type: NotifyNewTripDto })
   @ApiResponse({ status: 200, description: 'Trip queued successfully', schema: { example: { ok: true } } })
   notifyNewTrip(@Body() payload: NotifyNewTripDto, @Res() res: Response) {
-    const { tripId, drivers } = payload;
+    const { tripId, drivers, userId } = payload;
     const io = this.tripsGateway.server;
+    
+    // Joint the user to the trip room immediately if they are online
+    if (userId) {
+      this.connectionManager.joinUserToTripRoom(io, userId, tripId);
+    }
 
     this.logger.log(
       `New trip ${tripId} → notifying ${drivers.length} driver(s): [${drivers.join(', ')}]`,

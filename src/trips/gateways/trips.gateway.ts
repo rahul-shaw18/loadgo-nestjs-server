@@ -24,6 +24,10 @@ export class TripsGateway
   server: Server;
 
   private readonly logger = new Logger(TripsGateway.name);
+  
+  // Cache of recently accepted trips to handle users who join a room "late"
+  // Map<tripId, { tripId, driverId }>
+  private recentAcceptances = new Map<number, { tripId: number; driverId: string | number }>();
 
   constructor(
     private readonly connectionManager: ConnectionManagerService,
@@ -98,8 +102,16 @@ export class TripsGateway
     this.connectionManager.addUser(userId, client.id);
 
     if (tripId) {
-      client.join(this.connectionManager.tripRoom(tripId));
-      this.logger.log(`User ${userId} joined trip room ${tripId}`);
+      const numericTripId = Number(tripId);
+      client.join(this.connectionManager.tripRoom(numericTripId));
+      this.logger.log(`User ${userId} joined trip room ${numericTripId}`);
+
+      // STATE SYNC ON JOIN: If this trip was already accepted, notify the user immediately
+      const cachedAcceptance = this.recentAcceptances.get(numericTripId);
+      if (cachedAcceptance) {
+        this.logger.log(`User ${userId} joined room late; sync-pushing acceptance for trip ${numericTripId}`);
+        client.emit(EVENTS.TRIP_ACCEPTED, cachedAcceptance);
+      }
     } else {
       this.logger.log(`User ${userId} registered (no active trip)`);
     }
@@ -169,11 +181,15 @@ export class TripsGateway
         this.server
           .to(this.connectionManager.tripRoom(numericTripId))
           .emit(EVENTS.TRIP_ACCEPTED, {
-            ...(typeof data === 'object' ? data : {}),
             tripId: numericTripId,
             driverId: driverId,
-            status: 2, // Ensure status is explicitly marked as ACCEPTED
           });
+
+        // CACHE ACCEPTANCE: Store for 5 minutes to handle "late joins" from the user
+        this.recentAcceptances.set(numericTripId, { tripId: numericTripId, driverId });
+        setTimeout(() => {
+          this.recentAcceptances.delete(numericTripId);
+        }, 5 * 60 * 1000);
 
         // Stop offering this trip to other drivers and clear their screen timers
         this.offerManager.clearAllOffersForTrip(this.server, numericTripId);
