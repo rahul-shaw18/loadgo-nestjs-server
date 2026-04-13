@@ -152,19 +152,27 @@ export class TripsGateway
         return;
       }
 
-      if (data?.success) {
+      const isSuccess =
+        data?.success === true ||
+        data?.status === 'success' ||
+        data?.message?.toLowerCase().includes('successfully');
+
+      if (isSuccess) {
         this.logger.log(
-          `Trip ${numericTripId} accepted by driver ${driverId} — confirmed`,
+          `Trip ${numericTripId} accepted by driver ${driverId} — confirmed (Backend: ${data?.message || 'OK'})`,
         );
       } else {
         this.logger.warn(
-          `Trip ${numericTripId} accept failed for driver ${driverId}: ${data?.message}`,
+          `Trip ${numericTripId} accept failed for driver ${driverId}. ` +
+            `Full Response: ${JSON.stringify(data)}`,
         );
         this.driverQueue.removeTripFromDriver(driverId, numericTripId);
         this.offerManager.offerNextTrip(this.server, driverId);
       }
     } catch (err) {
-      this.logger.error(`Failed to accept trip ${numericTripId}: ${err.message}`);
+      this.logger.error(
+        `Failed to accept trip ${numericTripId}: ${err.message}`,
+      );
       this.driverQueue.removeTripFromDriver(driverId, numericTripId);
       this.offerManager.offerNextTrip(this.server, driverId);
     }
