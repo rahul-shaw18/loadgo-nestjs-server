@@ -43,23 +43,37 @@ export class TripsController {
     summary: 'Notify drivers about a new trip',
     description:
       'Called by the main backend when a new trip is created. ' +
-      'Adds the trip to each eligible driver\'s queue and, if the driver has no active offer, ' +
+      "Adds the trip to each eligible driver's queue and, if the driver has no active offer, " +
       'immediately emits an OFFER_TRIP socket event with a 30-second screen timer.',
   })
   @ApiBody({ type: NotifyNewTripDto })
-  @ApiResponse({ status: 200, description: 'Trip queued successfully', schema: { example: { ok: true } } })
+  @ApiResponse({
+    status: 200,
+    description: 'Trip queued successfully',
+    schema: { example: { ok: true } },
+  })
   notifyNewTrip(@Body() payload: NotifyNewTripDto, @Res() res: Response) {
     const { tripId, drivers, userId } = payload;
     const io = this.tripsGateway.server;
-    
-    // Joint the user to the trip room immediately if they are online
-    if (userId) {
+
+    // Join the user to the trip room immediately if they are online and the server is ready
+    if (userId && io) {
       this.connectionManager.joinUserToTripRoom(io, userId, tripId);
     }
 
     this.logger.log(
       `New trip ${tripId} → notifying ${drivers.length} driver(s): [${drivers.join(', ')}]`,
     );
+
+    // If socket server is not ready yet, we can't offer trips now.
+    // However, they are still added to the queue, and once drivers log in,
+    // they will catch up via the handleRegisterDriver logic.
+    if (!io) {
+      this.logger.warn(
+        `Socket.IO server not ready for trip ${tripId}. Drivers will catch up on login.`,
+      );
+      return res.json({ ok: true });
+    }
 
     drivers.forEach((driverId) => {
       const added = this.driverQueue.addTripToDriver(driverId, tripId);
@@ -86,8 +100,16 @@ export class TripsController {
       '8=REQUEST_TIMEOUT (cleans queues, emits RIDE_REVOKED).',
   })
   @ApiBody({ type: TripStatusUpdateDto })
-  @ApiResponse({ status: 200, description: 'Status updated successfully', schema: { example: { ok: true } } })
-  @ApiResponse({ status: 400, description: 'Invalid status code', schema: { example: { ok: false, message: 'Invalid status code: 99' } } })
+  @ApiResponse({
+    status: 200,
+    description: 'Status updated successfully',
+    schema: { example: { ok: true } },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid status code',
+    schema: { example: { ok: false, message: 'Invalid status code: 99' } },
+  })
   tripStatusUpdate(@Body() payload: TripStatusUpdateDto) {
     try {
       const { tripId, status, driverId, userId } = payload;
@@ -98,14 +120,24 @@ export class TripsController {
 
       // Defensive check: ensure socket server is available
       if (!io) {
-        this.logger.error('Socket.IO server is not initialized in TripsGateway');
+        this.logger.error(
+          'Socket.IO server is not initialized in TripsGateway',
+        );
         return { ok: false, message: 'Socket server not ready' };
       }
 
       switch (statusCode) {
         case STATUS.ACCEPTED: {
-          this.connectionManager.joinDriverToTripRoom(io, driverId as string | number, tripId);
-          this.connectionManager.joinUserToTripRoom(io, userId as string | number, tripId);
+          this.connectionManager.joinDriverToTripRoom(
+            io,
+            driverId as string | number,
+            tripId,
+          );
+          this.connectionManager.joinUserToTripRoom(
+            io,
+            userId as string | number,
+            tripId,
+          );
 
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_ACCEPTED,
@@ -180,8 +212,14 @@ export class TripsController {
 
       return { ok: true };
     } catch (error) {
-      this.logger.error(`Error in tripStatusUpdate: ${error.message}`, error.stack);
-      return { ok: false, message: 'Internal server error processing status update' };
+      this.logger.error(
+        `Error in tripStatusUpdate: ${error.message}`,
+        error.stack,
+      );
+      return {
+        ok: false,
+        message: 'Internal server error processing status update',
+      };
     }
   }
 }

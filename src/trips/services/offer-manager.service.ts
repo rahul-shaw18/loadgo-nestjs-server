@@ -1,9 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Server } from 'socket.io';
-import {
-  SCREEN_TIMER_MS,
-  ROTATION_GAP_MS,
-} from '../../config/app.config';
+import { SCREEN_TIMER_MS, ROTATION_GAP_MS } from '../../config/app.config';
 import { EVENTS } from '../../config/events.constant';
 import { DriverQueueService } from './driver-queue.service';
 import { ConnectionManagerService } from './connection-manager.service';
@@ -49,6 +46,12 @@ export class OfferManagerService {
       return;
     }
 
+    const socketId = this.connectionManager.getDriverSocketId(id);
+    if (!socketId) {
+      this.logger.debug(`Driver ${id} is offline, skipping offer for now`);
+      return;
+    }
+
     const screenTimerId = setTimeout(() => {
       this.onScreenTimeout(io, id);
     }, screenTimeMs);
@@ -58,20 +61,17 @@ export class OfferManagerService {
       screenTimerId,
     };
 
-    const socketId = this.connectionManager.getDriverSocketId(id);
-    if (socketId) {
-      io.to(socketId).emit(EVENTS.OFFER_TRIP, {
-        tripId: nextTrip.tripId,
-        screenTimeout: Math.ceil(screenTimeMs / 1000),
-      });
+    io.to(socketId).emit(EVENTS.OFFER_TRIP, {
+      tripId: nextTrip.tripId,
+      screenTimeout: Math.ceil(screenTimeMs / 1000),
+    });
 
-      this.logger.log(
-        `Offered trip ${nextTrip.tripId} to driver ${id} ` +
-          `(screen: ${Math.ceil(screenTimeMs / 1000)}s, ` +
-          `bg left: ${Math.ceil(bgTimeLeft / 1000)}s, ` +
-          `queue size: ${this.driverQueue.getQueueSize(id)})`,
-      );
-    }
+    this.logger.log(
+      `Offered trip ${nextTrip.tripId} to driver ${id} ` +
+        `(screen: ${Math.ceil(screenTimeMs / 1000)}s, ` +
+        `bg left: ${Math.ceil(bgTimeLeft / 1000)}s, ` +
+        `queue size: ${this.driverQueue.getQueueSize(id)})`,
+    );
   }
 
   private onScreenTimeout(io: Server, driverId: string | number) {
