@@ -84,81 +84,82 @@ export class TripsController {
   @ApiResponse({ status: 200, description: 'Status updated successfully', schema: { example: { ok: true } } })
   @ApiResponse({ status: 400, description: 'Invalid status code', schema: { example: { ok: false, message: 'Invalid status code: 99' } } })
   tripStatusUpdate(@Body() payload: TripStatusUpdateDto, @Res() res: Response) {
-    const { status, tripId, driverId, userId } = payload;
+    const { tripId, status, driverId, userId } = payload;
+    const id = Number(tripId);
     const io = this.tripsGateway.server;
     const statusCode = Number(status);
 
-    this.logger.log(`Trip status update: ${statusCode} for trip ${tripId}`);
+    this.logger.log(`Trip status update: ${statusCode} for trip ${id}`);
 
     switch (statusCode) {
       case STATUS.ACCEPTED: {
-        this.connectionManager.joinDriverToTripRoom(io, driverId as string | number, tripId);
-        this.connectionManager.joinUserToTripRoom(io, userId as string | number, tripId);
+        this.connectionManager.joinDriverToTripRoom(io, driverId as string | number, id);
+        this.connectionManager.joinUserToTripRoom(io, userId as string | number, id);
 
-        io.to(this.connectionManager.tripRoom(tripId)).emit(
+        io.to(this.connectionManager.tripRoom(id)).emit(
           EVENTS.TRIP_ACCEPTED,
           {
-            tripId,
+            id,
             driverId,
           },
         );
 
-        io.emit(EVENTS.CLOSE_RIDE_REQ, { driverId, tripId });
-        this.driverQueue.removeTripFromAllDrivers(tripId);
-        this.offerManager.clearAllOffersForTrip(io, tripId);
+        io.emit(EVENTS.CLOSE_RIDE_REQ, { driverId, id });
+        this.driverQueue.removeTripFromAllDrivers(id);
+        this.offerManager.clearAllOffersForTrip(io, id);
         break;
       }
       case STATUS.REVOKED: {
-        this.driverQueue.removeTripFromAllDrivers(tripId);
-        this.offerManager.clearAllOffersForTrip(io, tripId);
-        io.emit(EVENTS.RIDE_REVOKED, { tripId });
+        this.driverQueue.removeTripFromAllDrivers(id);
+        this.offerManager.clearAllOffersForTrip(io, id);
+        io.emit(EVENTS.RIDE_REVOKED, { id });
         break;
       }
       case STATUS.STARTED: {
-        io.to(this.connectionManager.tripRoom(tripId)).emit(
+        io.to(this.connectionManager.tripRoom(id)).emit(
           EVENTS.TRIP_STARTED,
           {
-            tripId,
+            id,
             driverId,
           },
         );
         break;
       }
       case STATUS.COMPLETED: {
-        io.to(this.connectionManager.tripRoom(tripId)).emit(
+        io.to(this.connectionManager.tripRoom(id)).emit(
           EVENTS.TRIP_COMPLETED,
           {
-            tripId,
+            id,
           },
         );
         break;
       }
       case STATUS.CANCELLED_BY_USER: {
-        this.driverQueue.removeTripFromAllDrivers(tripId);
-        this.offerManager.clearAllOffersForTrip(io, tripId);
-        io.to(this.connectionManager.tripRoom(tripId)).emit(
+        this.driverQueue.removeTripFromAllDrivers(id);
+        this.offerManager.clearAllOffersForTrip(io, id);
+        io.to(this.connectionManager.tripRoom(id)).emit(
           EVENTS.TRIP_CANCELLED,
           {
-            tripId,
+            id,
           },
         );
-        io.emit(EVENTS.RIDE_CANCEL_BY_USER, { tripId });
+        io.emit(EVENTS.RIDE_CANCEL_BY_USER, { id });
         break;
       }
       case STATUS.CANCELLED_BY_DRIVER: {
-        io.to(this.connectionManager.tripRoom(tripId)).emit(
+        io.to(this.connectionManager.tripRoom(id)).emit(
           EVENTS.TRIP_CANCELLED,
           {
-            tripId,
+            id,
           },
         );
-        io.emit(EVENTS.RIDE_CANCEL_BY_DRIVER, { tripId });
+        io.emit(EVENTS.RIDE_CANCEL_BY_DRIVER, { id });
         break;
       }
       case STATUS.REQUEST_TIMEOUT: {
-        this.driverQueue.removeTripFromAllDrivers(tripId);
-        this.offerManager.clearAllOffersForTrip(io, tripId);
-        io.emit(EVENTS.RIDE_REVOKED, { tripId });
+        this.driverQueue.removeTripFromAllDrivers(id);
+        this.offerManager.clearAllOffersForTrip(io, id);
+        io.emit(EVENTS.RIDE_REVOKED, { id });
         break;
       }
       default: {
