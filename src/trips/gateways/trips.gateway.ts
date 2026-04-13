@@ -139,7 +139,18 @@ export class TripsGateway
         this.offerManager.offerNextTrip(this.server, driverId);
         return;
       }
-      const data = await res.json();
+      const responseText = await res.text();
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        this.logger.error(
+          `Failed to parse JSON response from backend for trip ${numericTripId}. Raw response: ${responseText}`,
+        );
+        this.driverQueue.removeTripFromDriver(driverId, numericTripId);
+        this.offerManager.offerNextTrip(this.server, driverId);
+        return;
+      }
 
       if (data?.success) {
         this.logger.log(
