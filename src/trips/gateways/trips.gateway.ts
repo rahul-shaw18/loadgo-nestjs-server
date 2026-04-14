@@ -125,7 +125,7 @@ export class TripsGateway
     }
   }
 
-  @SubscribeMessage(EVENTS.ACCEPT_OFFER)
+  @SubscribeMessage(EVENTS.TRIP_ACCEPTED)
   async handleAcceptOffer(
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { tripId: number },
@@ -134,7 +134,7 @@ export class TripsGateway
     const numericTripId = Number(tripId);
     const driverId = this.findDriverIdBySocket(client.id);
     if (!driverId) {
-      this.logger.warn('ACCEPT_OFFER from unknown socket');
+      this.logger.warn('TRIP_ACCEPTED from unknown socket');
       return;
     }
 
@@ -224,7 +224,7 @@ export class TripsGateway
     }
   }
 
-  @SubscribeMessage(EVENTS.REJECT_OFFER)
+  @SubscribeMessage(EVENTS.TRIP_REJECTED)
   handleRejectOffer(
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { tripId: number },
@@ -233,7 +233,7 @@ export class TripsGateway
     const numericTripId = Number(tripId);
     const driverId = this.findDriverIdBySocket(client.id);
     if (!driverId) {
-      this.logger.warn('REJECT_OFFER from unknown socket');
+      this.logger.warn('TRIP_REJECTED from unknown socket');
       return;
     }
 

@@ -59,8 +59,8 @@ flowchart TB
     subgraph "🔌 WebSocket Entry Points (Mobile Apps → This Server)"
         W1["REGISTER_DRIVER<br/>─────────────────────<br/>📥 Payload: { driverId, tripId? }"]
         W2["REGISTER_USER<br/>─────────────────────<br/>📥 Payload: { userId, tripId? }"]
-        W3["ACCEPT_OFFER<br/>─────────────────────<br/>📥 Payload: { tripId }"]
-        W4["REJECT_OFFER<br/>─────────────────────<br/>📥 Payload: { tripId }"]
+        W3["TRIP_ACCEPTED<br/>─────────────────────<br/>📥 Payload: { tripId }"]
+        W4["TRIP_REJECTED<br/>─────────────────────<br/>📥 Payload: { tripId }"]
         W5["disconnect<br/>─────────────────────<br/>📥 Automatic on socket close"]
     end
 
@@ -71,16 +71,16 @@ flowchart TB
     end
 
     subgraph "📡 Socket Events Fired (This Server → Mobile Apps)"
-        E1["OFFER_TRIP → single driver"]
-        E2["OFFER_EXPIRED → single driver"]
+        E1["INCOMING_TRIP → single driver"]
+        E2["INCOMING_TRIP_EXPIRED → single driver"]
         E3["TRIP_ACCEPTED → trip room"]
         E4["TRIP_STARTED → trip room"]
         E5["TRIP_COMPLETED → trip room"]
-        E6["TRIP_CANCELLED → trip room"]
-        E7["CLOSE_RIDE_REQ → all sockets"]
-        E8["RIDE_REVOKED → all sockets"]
-        E9["RIDE_CANCEL_BY_USER → all sockets"]
-        E10["RIDE_CANCEL_BY_DRIVER → all sockets"]
+        E6["TRIP_CANCELLED_BY_USER / TRIP_CANCELLED_BY_DRIVER → trip room"]
+        E7["TRIP_ACCEPTED_BY_OTHER_DRIVER → all sockets"]
+        E8["TRIP_REVOKED → all sockets"]
+        E9["TRIP_CANCELLED_BY_USER → all sockets"]
+        E10["TRIP_CANCELLED_BY_DRIVER → all sockets"]
     end
 
     R1 --> S2
@@ -147,7 +147,7 @@ sequenceDiagram
         Note over OM: Saves activeOffer:<br/>activeOffers["D1"] = {<br/>  tripId: 500,<br/>  screenTimerId: <ref><br/>}
         OM->>CM: getDriverSocketId("D1")
         CM-->>OM: "socket_abc123"
-        OM->>D1: io.to("socket_abc123").emit("OFFER_TRIP")<br/>📤 Payload: { tripId: 500, screenTimeout: 30 }
+        OM->>D1: io.to("socket_abc123").emit("INCOMING_TRIP")<br/>📤 Payload: { tripId: 500, screenTimeout: 30 }
     end
 
     rect rgb(40, 80, 40)
@@ -161,7 +161,7 @@ sequenceDiagram
         DQ-->>OM: { tripId: 500, bgExpireAt: ... }
         OM->>CM: getDriverSocketId("D2")
         CM-->>OM: "socket_def456"
-        OM->>D2: io.to("socket_def456").emit("OFFER_TRIP")<br/>📤 Payload: { tripId: 500, screenTimeout: 30 }
+        OM->>D2: io.to("socket_def456").emit("INCOMING_TRIP")<br/>📤 Payload: { tripId: 500, screenTimeout: 30 }
     end
 
     CTRL-->>BE: 📤 RESPONSE: { ok: true }
@@ -267,7 +267,7 @@ sequenceDiagram
         Note over CTRL,All: Step 2: Emit events
         CTRL->>Room: io.to("trip_500").emit("TRIP_ACCEPTED")<br/>📤 Payload: { tripId: 500, driverId: "D1" }
         Note over Room: Both D1 and U1 receive this<br/>(they are now in room trip_500)
-        CTRL->>All: io.emit("CLOSE_RIDE_REQ")<br/>📤 Payload: { driverId: "D1", tripId: 500 }
+        CTRL->>All: io.emit("TRIP_ACCEPTED_BY_OTHER_DRIVER")<br/>📤 Payload: { driverId: "D1", tripId: 500 }
         Note over All: ALL connected sockets receive this<br/>Drivers should dismiss trip 500 from their UI
     end
 
@@ -282,7 +282,7 @@ sequenceDiagram
         OM->>OM: clearOffer("D2")<br/>→ clearTimeout(D2's screenTimerId)<br/>→ delete activeOffers["D2"]
         Note over OM: After 3s rotation gap:
         OM->>OM: setTimeout(() => offerNextTrip(io, "D2"), 3000)
-        OM->>D2: emit OFFER_TRIP (next trip from D2's queue)
+        OM->>D2: emit INCOMING_TRIP (next trip from D2's queue)
     end
 
     CTRL-->>BE: 📤 RESPONSE: { ok: true }
@@ -307,7 +307,7 @@ sequenceDiagram
     BE->>CTRL: { status: 3, tripId: 500 }
     CTRL->>DQ: removeTripFromAllDrivers(500)
     CTRL->>OM: clearAllOffersForTrip(io, 500)
-    CTRL->>All: emit "RIDE_REVOKED" { tripId: 500 }
+    CTRL->>All: emit "TRIP_REVOKED" { tripId: 500 }
     CTRL-->>BE: { ok: true }
 
     Note over BE,All: STATUS 4: STARTED
@@ -324,21 +324,21 @@ sequenceDiagram
     BE->>CTRL: { status: 6, tripId: 500 }
     CTRL->>DQ: removeTripFromAllDrivers(500)
     CTRL->>OM: clearAllOffersForTrip(io, 500)
-    CTRL->>Room: emit "TRIP_CANCELLED" { tripId: 500 }
-    CTRL->>All: emit "RIDE_CANCEL_BY_USER" { tripId: 500 }
+    CTRL->>Room: emit "TRIP_CANCELLED_BY_USER" { tripId: 500 }
+    CTRL->>All: emit "TRIP_CANCELLED_BY_USER" { tripId: 500 }
     CTRL-->>BE: { ok: true }
 
     Note over BE,All: STATUS 7: CANCELLED BY DRIVER
     BE->>CTRL: { status: 7, tripId: 500 }
-    CTRL->>Room: emit "TRIP_CANCELLED" { tripId: 500 }
-    CTRL->>All: emit "RIDE_CANCEL_BY_DRIVER" { tripId: 500 }
+    CTRL->>Room: emit "TRIP_CANCELLED_BY_DRIVER" { tripId: 500 }
+    CTRL->>All: emit "TRIP_CANCELLED_BY_DRIVER" { tripId: 500 }
     CTRL-->>BE: { ok: true }
 
     Note over BE,All: STATUS 8: REQUEST TIMEOUT
     BE->>CTRL: { status: 8, tripId: 500 }
     CTRL->>DQ: removeTripFromAllDrivers(500)
     CTRL->>OM: clearAllOffersForTrip(io, 500)
-    CTRL->>All: emit "RIDE_REVOKED" { tripId: 500 }
+    CTRL->>All: emit "TRIP_REVOKED" { tripId: 500 }
     CTRL-->>BE: { ok: true }
 ```
 
@@ -398,8 +398,8 @@ sequenceDiagram
                     Note over DQ: Creates QueueEntry with 5min expiry
                 end
                 GW->>OM: offerNextTrip(io, "D1")
-                Note over OM: Gets first trip from queue<br/>Emits OFFER_TRIP to driver<br/>Starts 30s screen timer
-                OM->>D: emit "OFFER_TRIP"<br/>📤 { tripId: 500, screenTimeout: 30 }
+                Note over OM: Gets first trip from queue<br/>Emits INCOMING_TRIP to driver<br/>Starts 30s screen timer
+                OM->>D: emit "INCOMING_TRIP"<br/>📤 { tripId: 500, screenTimeout: 30 }
             end
 
             alt No trips found
@@ -489,7 +489,7 @@ sequenceDiagram
     DQ-->>OM: { tripId: 501, bgExpireAt: ... }
     OM->>CM: getDriverSocketId("D1")
     CM-->>OM: "socket_abc"
-    OM->>D: emit "OFFER_TRIP"<br/>📤 { tripId: 501, screenTimeout: 30 }
+    OM->>D: emit "INCOMING_TRIP"<br/>📤 { tripId: 501, screenTimeout: 30 }
     Note over OM: New 30s screen timer starts for trip 501
 
     Note over D,CM: ──────────────────────────────
@@ -498,7 +498,7 @@ sequenceDiagram
     Note over OM: onScreenTimeout fires for "D1"
     OM->>CM: getDriverSocketId("D1")
     CM-->>OM: "socket_abc"
-    OM->>D: emit "OFFER_EXPIRED"<br/>📤 { tripId: 500 }
+    OM->>D: emit "INCOMING_TRIP_EXPIRED"<br/>📤 { tripId: 500 }
     OM->>OM: delete activeOffers["D1"]
     OM->>DQ: rotateCurrentTrip("D1")
     Note over OM: Wait 3 seconds
@@ -576,7 +576,7 @@ sequenceDiagram
 
     Note over User,Driver: ━━━ PHASE 2: OFFER TO DRIVERS ━━━
 
-    RS->>DA: emit OFFER_TRIP<br/>📤 { tripId: 500, screenTimeout: 30 }
+    RS->>DA: emit INCOMING_TRIP<br/>📤 { tripId: 500, screenTimeout: 30 }
     Note over RS: ⏱ 30s screen timer starts for each driver
 
     Note over User,Driver: ━━━ PHASE 3: DRIVER ACCEPTS ━━━
@@ -593,7 +593,7 @@ sequenceDiagram
     RS->>RS: joinDriverToTripRoom(D1, trip_500)<br/>joinUserToTripRoom(U1, trip_500)
     RS->>UA: emit TRIP_ACCEPTED<br/>📤 { tripId: 500, driverId: "D1" }
     RS->>DA: emit TRIP_ACCEPTED (same room)
-    RS->>DA: emit CLOSE_RIDE_REQ (broadcast)<br/>📤 { driverId: "D1", tripId: 500 }
+    RS->>DA: emit TRIP_ACCEPTED_BY_OTHER_DRIVER (broadcast)<br/>📤 { driverId: "D1", tripId: 500 }
     RS->>RS: removeTripFromAllDrivers(500)<br/>clearAllOffersForTrip(500)
     RS-->>BE: { ok: true }
 
@@ -681,23 +681,23 @@ graph LR
 
 #### `GET /health`
 
-| Property | Value |
-|---|---|
-| **File** | [`src/app.controller.ts`](src/app.controller.ts) |
-| **Input** | None |
-| **Output** | `{ status: "ok", uptime: <seconds> }` |
-| **Purpose** | Liveness check |
+| Property    | Value                                            |
+| ----------- | ------------------------------------------------ |
+| **File**    | [`src/app.controller.ts`](src/app.controller.ts) |
+| **Input**   | None                                             |
+| **Output**  | `{ status: "ok", uptime: <seconds> }`            |
+| **Purpose** | Liveness check                                   |
 
 ---
 
 #### `POST /notify-new-trip`
 
-| Property | Value |
-|---|---|
-| **File** | [`src/trips/controllers/trips.controller.ts`](src/trips/controllers/trips.controller.ts) |
-| **DTO** | `NotifyNewTripDto` |
-| **Input** | `{ tripId: number, drivers: (string\|number)[] }` |
-| **Output** | `{ ok: true }` |
+| Property   | Value                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------- |
+| **File**   | [`src/trips/controllers/trips.controller.ts`](src/trips/controllers/trips.controller.ts) |
+| **DTO**    | `NotifyNewTripDto`                                                                       |
+| **Input**  | `{ tripId: number, drivers: (string\|number)[] }`                                        |
+| **Output** | `{ ok: true }`                                                                           |
 
 **What happens step by step:**
 
@@ -719,7 +719,7 @@ sequenceDiagram
             CTRL->>OM: offerNextTrip(io, driverId)
             OM->>DQ: getNextTrip(driverId)
             DQ-->>OM: QueueEntry { tripId, bgExpireAt }
-            OM->>Driver: emit OFFER_TRIP { tripId, screenTimeout }
+            OM->>Driver: emit INCOMING_TRIP { tripId, screenTimeout }
             Note over OM: Start 30s screen timer
         end
     end
@@ -728,6 +728,7 @@ sequenceDiagram
 ```
 
 **Detailed flow:**
+
 1. Backend sends `tripId` + list of eligible `drivers`
 2. For **each driver**, `DriverQueueService.addTripToDriver()` is called:
    - Creates a `QueueEntry { tripId, addedAt: Date.now(), bgExpireAt: now + 5min }`
@@ -738,25 +739,25 @@ sequenceDiagram
 
 #### `POST /trip-status-update`
 
-| Property | Value |
-|---|---|
-| **File** | [`src/trips/controllers/trips.controller.ts`](src/trips/controllers/trips.controller.ts) |
-| **DTO** | `TripStatusUpdateDto` |
-| **Input** | `{ status: number, tripId: number, driverId?: string\|number, userId?: string\|number }` |
-| **Output** | `{ ok: true }` or `{ ok: false, message: "Invalid status code" }` |
+| Property   | Value                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------- |
+| **File**   | [`src/trips/controllers/trips.controller.ts`](src/trips/controllers/trips.controller.ts) |
+| **DTO**    | `TripStatusUpdateDto`                                                                    |
+| **Input**  | `{ status: number, tripId: number, driverId?: string\|number, userId?: string\|number }` |
+| **Output** | `{ ok: true }` or `{ ok: false, message: "Invalid status code" }`                        |
 
 **Status codes and their effects:**
 
-| Status Code | Name | What Happens |
-|---|---|---|
-| **1** | `REQUESTED` | *(not handled — trips arrive via notify-new-trip)* |
-| **2** | `ACCEPTED` | Joins driver + user to trip room → emits `TRIP_ACCEPTED` to room → emits `CLOSE_RIDE_REQ` globally → removes trip from all queues → clears all offers for this trip |
-| **3** | `REVOKED` | Removes trip from all queues → clears all offers → emits `RIDE_REVOKED` globally |
-| **4** | `STARTED` | Emits `TRIP_STARTED` to trip room |
-| **5** | `COMPLETED` | Emits `TRIP_COMPLETED` to trip room |
-| **6** | `CANCELLED_BY_USER` | Removes trip from all queues → clears offers → emits `TRIP_CANCELLED` to room + `RIDE_CANCEL_BY_USER` globally |
-| **7** | `CANCELLED_BY_DRIVER` | Emits `TRIP_CANCELLED` to room + `RIDE_CANCEL_BY_DRIVER` globally |
-| **8** | `REQUEST_TIMEOUT` | Removes trip from all queues → clears offers → emits `RIDE_REVOKED` globally |
+| Status Code | Name                  | What Happens                                                                                                                                                                       |
+| ----------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1**       | `REQUESTED`           | _(not handled — trips arrive via notify-new-trip)_                                                                                                                                 |
+| **2**       | `ACCEPTED`            | Joins driver + user to trip room → emits `TRIP_ACCEPTED` to room → emits `TRIP_ACCEPTED_BY_OTHER_DRIVER` globally → removes trip from all queues → clears all offers for this trip |
+| **3**       | `REVOKED`             | Removes trip from all queues → clears all offers → emits `TRIP_REVOKED` globally                                                                                                   |
+| **4**       | `STARTED`             | Emits `TRIP_STARTED` to trip room                                                                                                                                                  |
+| **5**       | `COMPLETED`           | Emits `TRIP_COMPLETED` to trip room                                                                                                                                                |
+| **6**       | `CANCELLED_BY_USER`   | Removes trip from all queues → clears offers → emits `TRIP_CANCELLED_BY_USER` to room + `TRIP_CANCELLED_BY_USER` globally                                                          |
+| **7**       | `CANCELLED_BY_DRIVER` | Emits `TRIP_CANCELLED_BY_DRIVER` to room + `TRIP_CANCELLED_BY_DRIVER` globally                                                                                                     |
+| **8**       | `REQUEST_TIMEOUT`     | Removes trip from all queues → clears offers → emits `TRIP_REVOKED` globally                                                                                                       |
 
 ```mermaid
 sequenceDiagram
@@ -773,7 +774,7 @@ sequenceDiagram
     CTRL->>CM: joinDriverToTripRoom(io, driverId, tripId)
     CTRL->>CM: joinUserToTripRoom(io, userId, tripId)
     CTRL->>Room: emit TRIP_ACCEPTED { tripId, driverId }
-    CTRL->>All: emit CLOSE_RIDE_REQ { driverId, tripId }
+    CTRL->>All: emit TRIP_ACCEPTED_BY_OTHER_DRIVER { driverId, tripId }
     CTRL->>DQ: removeTripFromAllDrivers(tripId)
     CTRL->>OM: clearAllOffersForTrip(io, tripId)
 
@@ -788,10 +789,10 @@ All events are handled in [`src/trips/gateways/trips.gateway.ts`](src/trips/gate
 
 #### `REGISTER_DRIVER`
 
-| Property | Value |
-|---|---|
+| Property  | Value                                                   |
+| --------- | ------------------------------------------------------- |
 | **Input** | `{ driverId: string\|number, tripId?: string\|number }` |
-| **Emits** | Potentially `OFFER_TRIP` |
+| **Emits** | Potentially `INCOMING_TRIP`                             |
 
 ```mermaid
 flowchart TD
@@ -816,6 +817,7 @@ flowchart TD
 ```
 
 **Three registration paths:**
+
 1. **Rejoin** — `tripId` is provided → driver was already on a trip, just rejoin the room
 2. **Verify** — No `tripId` → ask main backend if driver has an active trip → join that room
 3. **Fresh** — No active trip → fetch all currently-searching trips from backend → queue them all and start offering
@@ -824,8 +826,8 @@ flowchart TD
 
 #### `REGISTER_USER`
 
-| Property | Value |
-|---|---|
+| Property  | Value                                                 |
+| --------- | ----------------------------------------------------- |
 | **Input** | `{ userId: string\|number, tripId?: string\|number }` |
 
 ```mermaid
@@ -847,9 +849,9 @@ flowchart TD
 
 #### `ACCEPT_OFFER`
 
-| Property | Value |
-|---|---|
-| **Input** | `{ tripId: number }` |
+| Property  | Value                               |
+| --------- | ----------------------------------- |
+| **Input** | `{ tripId: number }`                |
 | **Calls** | `POST /accept-trip` on main backend |
 
 ```mermaid
@@ -890,11 +892,12 @@ sequenceDiagram
 
 #### `REJECT_OFFER`
 
-| Property | Value |
-|---|---|
+| Property  | Value                |
+| --------- | -------------------- |
 | **Input** | `{ tripId: number }` |
 
 **Flow:**
+
 1. Resolve `driverId` from `socketId`
 2. Verify the current offer matches the `tripId` being rejected
 3. Call `offerManager.handleReject(io, driverId)`:
@@ -906,11 +909,12 @@ sequenceDiagram
 
 #### `disconnect` (automatic)
 
-| Property | Value |
-|---|---|
-| **Input** | *(automatic on socket disconnect)* |
+| Property  | Value                              |
+| --------- | ---------------------------------- |
+| **Input** | _(automatic on socket disconnect)_ |
 
 **Flow:**
+
 1. `connectionManager.removeDriverBySocketId(socketId)` → returns driverId if was a driver
 2. `connectionManager.removeUserBySocketId(socketId)` → returns userId if was a user
 3. If it was a driver → `offerManager.cleanupDriver(driverId)`:
@@ -921,18 +925,18 @@ sequenceDiagram
 
 ### 5.3 WebSocket Events (server → client)
 
-| Event | Target | Payload | When |
-|---|---|---|---|
-| `OFFER_TRIP` | Single driver socket | `{ tripId, screenTimeout }` | When a trip is offered from the queue |
-| `OFFER_EXPIRED` | Single driver socket | `{ tripId }` | When 30s screen timer runs out |
-| `CLOSE_RIDE_REQ` | All sockets (broadcast) | `{ driverId, tripId }` | When a trip is accepted — tells all drivers to dismiss it |
-| `TRIP_ACCEPTED` | Trip room | `{ tripId, driverId }` | Status 2 from backend |
-| `TRIP_STARTED` | Trip room | `{ tripId, driverId }` | Status 4 from backend |
-| `TRIP_COMPLETED` | Trip room | `{ tripId }` | Status 5 from backend |
-| `TRIP_CANCELLED` | Trip room | `{ tripId }` | Status 6 or 7 from backend |
-| `RIDE_REVOKED` | All sockets (broadcast) | `{ tripId }` | Status 3 or 8 from backend |
-| `RIDE_CANCEL_BY_USER` | All sockets (broadcast) | `{ tripId }` | Status 6 from backend |
-| `RIDE_CANCEL_BY_DRIVER` | All sockets (broadcast) | `{ tripId }` | Status 7 from backend |
+| Event                                                 | Target                  | Payload                     | When                                                      |
+| ----------------------------------------------------- | ----------------------- | --------------------------- | --------------------------------------------------------- |
+| `INCOMING_TRIP`                                       | Single driver socket    | `{ tripId, screenTimeout }` | When a trip is offered from the queue                     |
+| `INCOMING_TRIP_EXPIRED`                               | Single driver socket    | `{ tripId }`                | When 30s screen timer runs out                            |
+| `TRIP_ACCEPTED_BY_OTHER_DRIVER`                       | All sockets (broadcast) | `{ driverId, tripId }`      | When a trip is accepted — tells all drivers to dismiss it |
+| `TRIP_ACCEPTED`                                       | Trip room               | `{ tripId, driverId }`      | Status 2 from backend                                     |
+| `TRIP_STARTED`                                        | Trip room               | `{ tripId, driverId }`      | Status 4 from backend                                     |
+| `TRIP_COMPLETED`                                      | Trip room               | `{ tripId }`                | Status 5 from backend                                     |
+| `TRIP_CANCELLED_BY_USER` / `TRIP_CANCELLED_BY_DRIVER` | Trip room               | `{ tripId }`                | Status 6 or 7 from backend                                |
+| `TRIP_REVOKED`                                        | All sockets (broadcast) | `{ tripId }`                | Status 3 or 8 from backend                                |
+| `TRIP_CANCELLED_BY_USER`                              | All sockets (broadcast) | `{ tripId }`                | Status 6 from backend                                     |
+| `TRIP_CANCELLED_BY_DRIVER`                            | All sockets (broadcast) | `{ tripId }`                | Status 7 from backend                                     |
 
 ---
 
@@ -943,23 +947,24 @@ sequenceDiagram
 **File:** [`src/trips/services/connection-manager.service.ts`](src/trips/services/connection-manager.service.ts)
 
 **State:**
+
 ```
 onlineDrivers: { [driverId]: socketId }
 onlineUsers:   { [userId]:   socketId }
 ```
 
-| Method | Input | Output | Purpose |
-|---|---|---|---|
-| `addDriver(driverId, socketId)` | ID + socket | void | Register a driver connection |
-| `removeDriverBySocketId(socketId)` | socket ID | driverId or null | Unregister on disconnect |
-| `getDriverSocketId(driverId)` | driver ID | socketId or null | Look up socket for emitting |
-| `getAllDriverIds()` | none | string[] | List all connected drivers |
-| `addUser(userId, socketId)` | ID + socket | void | Register a user connection |
-| `removeUserBySocketId(socketId)` | socket ID | userId or null | Unregister on disconnect |
-| `getUserSocketId(userId)` | user ID | socketId or null | Look up socket for emitting |
-| `tripRoom(tripId)` | trip ID | `"trip_<id>"` | Generate room name |
-| `joinDriverToTripRoom(io, driverId, tripId)` | server + IDs | void | Put driver socket in room |
-| `joinUserToTripRoom(io, userId, tripId)` | server + IDs | void | Put user socket in room |
+| Method                                       | Input        | Output           | Purpose                      |
+| -------------------------------------------- | ------------ | ---------------- | ---------------------------- |
+| `addDriver(driverId, socketId)`              | ID + socket  | void             | Register a driver connection |
+| `removeDriverBySocketId(socketId)`           | socket ID    | driverId or null | Unregister on disconnect     |
+| `getDriverSocketId(driverId)`                | driver ID    | socketId or null | Look up socket for emitting  |
+| `getAllDriverIds()`                          | none         | string[]         | List all connected drivers   |
+| `addUser(userId, socketId)`                  | ID + socket  | void             | Register a user connection   |
+| `removeUserBySocketId(socketId)`             | socket ID    | userId or null   | Unregister on disconnect     |
+| `getUserSocketId(userId)`                    | user ID      | socketId or null | Look up socket for emitting  |
+| `tripRoom(tripId)`                           | trip ID      | `"trip_<id>"`    | Generate room name           |
+| `joinDriverToTripRoom(io, driverId, tripId)` | server + IDs | void             | Put driver socket in room    |
+| `joinUserToTripRoom(io, userId, tripId)`     | server + IDs | void             | Put user socket in room      |
 
 ---
 
@@ -968,6 +973,7 @@ onlineUsers:   { [userId]:   socketId }
 **File:** [`src/trips/services/driver-queue.service.ts`](src/trips/services/driver-queue.service.ts)
 
 **State:**
+
 ```
 driverQueues: {
   [driverId]: [
@@ -980,18 +986,18 @@ driverQueues: {
 
 Each driver has a **FIFO queue** of trips. Each entry has a `bgExpireAt` timestamp (5 minutes after being added). Expired entries are automatically purged whenever the queue is read.
 
-| Method | Input | Output | Purpose |
-|---|---|---|---|
-| `addTripToDriver(driverId, tripId)` | IDs | `boolean` | Add trip to end of queue (returns false if duplicate) |
-| `removeTripFromDriver(driverId, tripId)` | IDs | void | Remove specific trip from one driver |
-| `removeTripFromAllDrivers(tripId)` | tripId | `string[]` (affected drivers) | Remove trip from every driver's queue |
-| `getNextTrip(driverId)` | driverId | `QueueEntry \| null` | Peek at first trip (purges expired first) |
-| `rotateCurrentTrip(driverId)` | driverId | `QueueEntry \| null` | Move front trip to back (unless expired), return new front |
-| `getQueue(driverId)` | driverId | `QueueEntry[]` | Full queue snapshot |
-| `getQueueSize(driverId)` | driverId | `number` | Queue length |
-| `hasTripInQueue(driverId, tripId)` | IDs | `boolean` | Check if specific trip is queued |
-| `clearDriver(driverId)` | driverId | void | Delete entire queue |
-| `getDriversWithTrip(tripId)` | tripId | `string[]` | Find all drivers that have this trip queued |
+| Method                                   | Input    | Output                        | Purpose                                                    |
+| ---------------------------------------- | -------- | ----------------------------- | ---------------------------------------------------------- |
+| `addTripToDriver(driverId, tripId)`      | IDs      | `boolean`                     | Add trip to end of queue (returns false if duplicate)      |
+| `removeTripFromDriver(driverId, tripId)` | IDs      | void                          | Remove specific trip from one driver                       |
+| `removeTripFromAllDrivers(tripId)`       | tripId   | `string[]` (affected drivers) | Remove trip from every driver's queue                      |
+| `getNextTrip(driverId)`                  | driverId | `QueueEntry \| null`          | Peek at first trip (purges expired first)                  |
+| `rotateCurrentTrip(driverId)`            | driverId | `QueueEntry \| null`          | Move front trip to back (unless expired), return new front |
+| `getQueue(driverId)`                     | driverId | `QueueEntry[]`                | Full queue snapshot                                        |
+| `getQueueSize(driverId)`                 | driverId | `number`                      | Queue length                                               |
+| `hasTripInQueue(driverId, tripId)`       | IDs      | `boolean`                     | Check if specific trip is queued                           |
+| `clearDriver(driverId)`                  | driverId | void                          | Delete entire queue                                        |
+| `getDriversWithTrip(tripId)`             | tripId   | `string[]`                    | Find all drivers that have this trip queued                |
 
 ---
 
@@ -1000,6 +1006,7 @@ Each driver has a **FIFO queue** of trips. Each entry has a `bgExpireAt` timesta
 **File:** [`src/trips/services/offer-manager.service.ts`](src/trips/services/offer-manager.service.ts)
 
 **State:**
+
 ```
 activeOffers: {
   [driverId]: {
@@ -1011,16 +1018,16 @@ activeOffers: {
 
 Only **one** offer can be active per driver at a time.
 
-| Method | Input | Output | Purpose |
-|---|---|---|---|
-| `offerNextTrip(io, driverId)` | server + ID | void | Pop next trip from queue and emit `OFFER_TRIP` to driver, start 30s timer |
-| `handleAccept(driverId, tripId)` | IDs | `{ valid, tripId }` | Validate accept matches current offer, clear timer |
-| `handleReject(io, driverId)` | server + ID | void | Clear offer, rotate queue, offer next after 3s gap |
-| `clearOffer(driverId)` | ID | void | Cancel screen timer + delete offer |
-| `getOffer(driverId)` | ID | `ActiveOffer \| null` | Get current offer |
-| `hasOffer(driverId)` | ID | `boolean` | Check if driver has an offer |
-| `clearAllOffersForTrip(io, tripId)` | server + tripId | void | Clear offer from all drivers showing this trip, then offer them next trips |
-| `cleanupDriver(driverId)` | ID | void | Clear offer + clear entire queue (used on disconnect) |
+| Method                              | Input           | Output                | Purpose                                                                      |
+| ----------------------------------- | --------------- | --------------------- | ---------------------------------------------------------------------------- |
+| `offerNextTrip(io, driverId)`       | server + ID     | void                  | Pop next trip from queue and emit `INCOMING_TRIP` to driver, start 30s timer |
+| `handleAccept(driverId, tripId)`    | IDs             | `{ valid, tripId }`   | Validate accept matches current offer, clear timer                           |
+| `handleReject(io, driverId)`        | server + ID     | void                  | Clear offer, rotate queue, offer next after 3s gap                           |
+| `clearOffer(driverId)`              | ID              | void                  | Cancel screen timer + delete offer                                           |
+| `getOffer(driverId)`                | ID              | `ActiveOffer \| null` | Get current offer                                                            |
+| `hasOffer(driverId)`                | ID              | `boolean`             | Check if driver has an offer                                                 |
+| `clearAllOffersForTrip(io, tripId)` | server + tripId | void                  | Clear offer from all drivers showing this trip, then offer them next trips   |
+| `cleanupDriver(driverId)`           | ID              | void                  | Clear offer + clear entire queue (used on disconnect)                        |
 
 ---
 
@@ -1055,17 +1062,17 @@ sequenceDiagram
 
     Offer->>Queue: getNextTrip(driver) → trip101
     Note over Offer: screenTime = min(30s, bgTimeLeft)
-    Offer->>Screen: OFFER_TRIP { tripId: 101, screenTimeout: 30 }
+    Offer->>Screen: INCOMING_TRIP { tripId: 101, screenTimeout: 30 }
     Note over Offer: Start 30s screen timer
 
     alt Driver does nothing (30s passes)
         Note over Offer: ⏱ Screen timer fires
-        Offer->>Screen: OFFER_EXPIRED { tripId: 101 }
+        Offer->>Screen: INCOMING_TRIP_EXPIRED { tripId: 101 }
         Offer->>Queue: rotateCurrentTrip(driver)
         Note over Queue: trip101 moves to back of queue
         Note over Offer: Wait 3s (rotation gap)
         Offer->>Queue: getNextTrip(driver) → trip102 (or trip101 again if only 1)
-        Offer->>Screen: OFFER_TRIP { tripId: 102, screenTimeout: 30 }
+        Offer->>Screen: INCOMING_TRIP { tripId: 102, screenTimeout: 30 }
     end
 
     alt 5 minutes pass for trip101
@@ -1088,7 +1095,7 @@ stateDiagram-v2
 
     Searching --> Queued: POST /notify-new-trip<br/>(trip added to driver queues)
 
-    Queued --> Offered: offerNextTrip()<br/>OFFER_TRIP emitted
+    Queued --> Offered: offerNextTrip()<br/>INCOMING_TRIP emitted
 
     Offered --> Accepted: Driver emits ACCEPT_OFFER<br/>→ POST /accept-trip confirmed
     Offered --> Rejected: Driver emits REJECT_OFFER
@@ -1105,9 +1112,9 @@ stateDiagram-v2
 
     Started --> Completed: POST /trip-status-update (status=5)<br/>TRIP_COMPLETED
 
-    Revoked --> [*]: RIDE_REVOKED emitted
-    CancelledByUser --> [*]: TRIP_CANCELLED + RIDE_CANCEL_BY_USER
-    CancelledByDriver --> [*]: TRIP_CANCELLED + RIDE_CANCEL_BY_DRIVER
+    Revoked --> [*]: TRIP_REVOKED emitted
+    CancelledByUser --> [*]: TRIP_CANCELLED_BY_USER + TRIP_CANCELLED_BY_USER
+    CancelledByDriver --> [*]: TRIP_CANCELLED_BY_DRIVER + TRIP_CANCELLED_BY_DRIVER
     Completed --> [*]
 
     Queued --> Expired: 5min background timer
@@ -1129,7 +1136,7 @@ Here's what happens for a complete trip from creation to completion:
 5. For each driver:
    └─ DriverQueueService.addTripToDriver("D1", 500)  →  { tripId:500, bgExpireAt: now+5min }
    └─ If D1 has no active offer → OfferManagerService.offerNextTrip(io, "D1")
-      └─ Emits OFFER_TRIP { tripId: 500, screenTimeout: 30 } to D1's socket
+      └─ Emits INCOMING_TRIP { tripId: 500, screenTimeout: 30 } to D1's socket
       └─ Starts 30-second screen timer for D1
 
 6. D1's app shows the trip card with a 30s countdown
@@ -1148,7 +1155,7 @@ Here's what happens for a complete trip from creation to completion:
    └─ ConnectionManager.joinDriverToTripRoom(io, "D1", 500)  →  D1 joins room "trip_500"
    └─ ConnectionManager.joinUserToTripRoom(io, "U1", 500)    →  U1 joins room "trip_500"
    └─ Emit TRIP_ACCEPTED { tripId: 500, driverId: "D1" } → to room "trip_500"
-   └─ Emit CLOSE_RIDE_REQ { driverId: "D1", tripId: 500 } → broadcast to ALL
+   └─ Emit TRIP_ACCEPTED_BY_OTHER_DRIVER { driverId: "D1", tripId: 500 } → broadcast to ALL
    └─ DriverQueue.removeTripFromAllDrivers(500) → removes from D2, D3 queues
    └─ OfferManager.clearAllOffersForTrip(io, 500) → clears D2/D3 offers, offers them next trips
 
@@ -1191,12 +1198,12 @@ All REST payloads are validated using `class-validator` decorators via NestJS's 
 
 ## 11. External API Calls (this server → main backend)
 
-| Call | Method | URL | When | Response Expected |
-|---|---|---|---|---|
-| Verify driver | GET | `{BACKEND_BASE_URL}verify-driver?driverId=X` | On REGISTER_DRIVER | `{ activeTripId?: string }` |
-| Verify user | GET | `{BACKEND_BASE_URL}verify-user?userId=X` | On REGISTER_USER | `{ activeTripId?: string }` |
-| Fetch searching trips | GET | `{BACKEND_BASE_URL}searching-trips` | On REGISTER_DRIVER (no active trip) | `Array<{ id: number }>` |
-| Accept trip | POST | `{BACKEND_BASE_URL}accept-trip` | On ACCEPT_OFFER | `{ success: boolean, message?: string }` |
+| Call                  | Method | URL                                          | When                                | Response Expected                        |
+| --------------------- | ------ | -------------------------------------------- | ----------------------------------- | ---------------------------------------- |
+| Verify driver         | GET    | `{BACKEND_BASE_URL}verify-driver?driverId=X` | On REGISTER_DRIVER                  | `{ activeTripId?: string }`              |
+| Verify user           | GET    | `{BACKEND_BASE_URL}verify-user?userId=X`     | On REGISTER_USER                    | `{ activeTripId?: string }`              |
+| Fetch searching trips | GET    | `{BACKEND_BASE_URL}searching-trips`          | On REGISTER_DRIVER (no active trip) | `Array<{ id: number }>`                  |
+| Accept trip           | POST   | `{BACKEND_BASE_URL}accept-trip`              | On ACCEPT_OFFER                     | `{ success: boolean, message?: string }` |
 
 > **Note:** All external calls use the native `fetch` API. The base URL defaults to `https://loadgo.in/loadgotest/` and can be overridden via the `BACKEND_URL` environment variable.
 
@@ -1204,14 +1211,14 @@ All REST payloads are validated using `class-validator` decorators via NestJS's 
 
 ## 12. Configuration Reference
 
-| Constant | Value | File | Purpose |
-|---|---|---|---|
-| `BACKEND_BASE_URL` | `process.env.BACKEND_URL \|\| "https://loadgo.in/loadgotest/"` | `app.config.ts` | Main backend API base |
-| `SCREEN_TIMER_MS` | `30,000` (30s) | `app.config.ts` | How long a trip is shown on driver screen |
-| `BACKGROUND_TIMER_MS` | `300,000` (5min) | `app.config.ts` | Total lifetime of a trip in a driver's queue |
-| `ROTATION_GAP_MS` | `3,000` (3s) | `app.config.ts` | Pause between trip rotations |
-| Port | `process.env.PORT \|\| 3000` | `main.ts` | Server listen port |
-| CORS | `origin: '*'` | `main.ts` + gateway | Allow all origins |
+| Constant              | Value                                                          | File                | Purpose                                      |
+| --------------------- | -------------------------------------------------------------- | ------------------- | -------------------------------------------- |
+| `BACKEND_BASE_URL`    | `process.env.BACKEND_URL \|\| "https://loadgo.in/loadgotest/"` | `app.config.ts`     | Main backend API base                        |
+| `SCREEN_TIMER_MS`     | `30,000` (30s)                                                 | `app.config.ts`     | How long a trip is shown on driver screen    |
+| `BACKGROUND_TIMER_MS` | `300,000` (5min)                                               | `app.config.ts`     | Total lifetime of a trip in a driver's queue |
+| `ROTATION_GAP_MS`     | `3,000` (3s)                                                   | `app.config.ts`     | Pause between trip rotations                 |
+| Port                  | `process.env.PORT \|\| 3000`                                   | `main.ts`           | Server listen port                           |
+| CORS                  | `origin: '*'`                                                  | `main.ts` + gateway | Allow all origins                            |
 
 ---
 
@@ -1243,6 +1250,6 @@ graph TD
     U2 -.-> U2_R
 ```
 
-- **Unicast** (to one driver): `io.to(socketId).emit(...)` — used for `OFFER_TRIP`, `OFFER_EXPIRED`
+- **Unicast** (to one driver): `io.to(socketId).emit(...)` — used for `INCOMING_TRIP`, `INCOMING_TRIP_EXPIRED`
 - **Room broadcast** (to trip participants): `io.to("trip_<id>").emit(...)` — used for `TRIP_ACCEPTED`, `TRIP_STARTED`, `TRIP_COMPLETED`, `TRIP_CANCELLED`
-- **Global broadcast** (to everyone): `io.emit(...)` — used for `CLOSE_RIDE_REQ`, `RIDE_REVOKED`, `RIDE_CANCEL_BY_USER`, `RIDE_CANCEL_BY_DRIVER`
+- **Global broadcast** (to everyone): `io.emit(...)` — used for `TRIP_ACCEPTED_BY_OTHER_DRIVER`, `TRIP_REVOKED`, `TRIP_CANCELLED_BY_USER`, `TRIP_CANCELLED_BY_DRIVER`

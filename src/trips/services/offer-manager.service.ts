@@ -61,7 +61,7 @@ export class OfferManagerService {
       screenTimerId,
     };
 
-    io.to(socketId).emit(EVENTS.OFFER_TRIP, {
+    io.to(socketId).emit(EVENTS.INCOMING_TRIP, {
       tripId: nextTrip.tripId,
       screenTimeout: Math.ceil(screenTimeMs / 1000),
     });
@@ -85,7 +85,9 @@ export class OfferManagerService {
 
     const socketId = this.connectionManager.getDriverSocketId(id);
     if (socketId) {
-      io.to(socketId).emit(EVENTS.OFFER_EXPIRED, { tripId: offer.tripId });
+      io.to(socketId).emit(EVENTS.INCOMING_TRIP_EXPIRED, {
+        tripId: offer.tripId,
+      });
     }
 
     delete this.activeOffers[id];

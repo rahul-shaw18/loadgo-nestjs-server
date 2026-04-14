@@ -44,7 +44,7 @@ export class TripsController {
     description:
       'Called by the main backend when a new trip is created. ' +
       "Adds the trip to each eligible driver's queue and, if the driver has no active offer, " +
-      'immediately emits an OFFER_TRIP socket event with a 30-second screen timer.',
+      'immediately emits an INCOMING_TRIP socket event with a 30-second screen timer.',
   })
   @ApiBody({ type: NotifyNewTripDto })
   @ApiResponse({
@@ -91,13 +91,13 @@ export class TripsController {
     summary: 'Update trip status and emit socket events',
     description:
       'Called by the main backend to transition a trip through its lifecycle. ' +
-      'Status codes: 2=ACCEPTED (joins rooms, emits TRIP_ACCEPTED + CLOSE_RIDE_REQ, cleans queues), ' +
-      '3=REVOKED (cleans queues, emits RIDE_REVOKED), ' +
+      'Status codes: 2=ACCEPTED (joins rooms, emits TRIP_ACCEPTED + TRIP_ACCEPTED_BY_OTHER_DRIVER, cleans queues), ' +
+      '3=REVOKED (cleans queues, emits TRIP_REVOKED), ' +
       '4=STARTED (emits TRIP_STARTED to room), ' +
       '5=COMPLETED (emits TRIP_COMPLETED to room), ' +
-      '6=CANCELLED_BY_USER (cleans queues, emits TRIP_CANCELLED + RIDE_CANCEL_BY_USER), ' +
-      '7=CANCELLED_BY_DRIVER (emits TRIP_CANCELLED + RIDE_CANCEL_BY_DRIVER), ' +
-      '8=REQUEST_TIMEOUT (cleans queues, emits RIDE_REVOKED).',
+      '6=CANCELLED_BY_USER (cleans queues, emits TRIP_CANCELLED_BY_USER), ' +
+      '7=CANCELLED_BY_DRIVER (emits TRIP_CANCELLED_BY_DRIVER), ' +
+      '8=REQUEST_TIMEOUT (cleans queues, emits TRIP_REVOKED).',
   })
   @ApiBody({ type: TripStatusUpdateDto })
   @ApiResponse({
@@ -147,7 +147,7 @@ export class TripsController {
             },
           );
 
-          io.emit(EVENTS.CLOSE_RIDE_REQ, { driverId, tripId });
+          io.emit(EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER, { driverId, tripId });
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
           break;
@@ -155,7 +155,7 @@ export class TripsController {
         case STATUS.REVOKED: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
-          io.emit(EVENTS.RIDE_REVOKED, { tripId });
+          io.emit(EVENTS.TRIP_REVOKED, { tripId });
           break;
         }
         case STATUS.STARTED: {
@@ -181,28 +181,28 @@ export class TripsController {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
-            EVENTS.TRIP_CANCELLED,
+            EVENTS.TRIP_CANCELLED_BY_USER,
             {
               tripId,
             },
           );
-          io.emit(EVENTS.RIDE_CANCEL_BY_USER, { tripId });
+          io.emit(EVENTS.TRIP_CANCELLED_BY_USER, { tripId });
           break;
         }
         case STATUS.CANCELLED_BY_DRIVER: {
           io.to(this.connectionManager.tripRoom(tripId)).emit(
-            EVENTS.TRIP_CANCELLED,
+            EVENTS.TRIP_CANCELLED_BY_DRIVER,
             {
               tripId,
             },
           );
-          io.emit(EVENTS.RIDE_CANCEL_BY_DRIVER, { tripId });
+          io.emit(EVENTS.TRIP_CANCELLED_BY_DRIVER, { tripId });
           break;
         }
         case STATUS.REQUEST_TIMEOUT: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
-          io.emit(EVENTS.RIDE_REVOKED, { tripId });
+          io.emit(EVENTS.TRIP_REVOKED, { tripId });
           break;
         }
         default: {
