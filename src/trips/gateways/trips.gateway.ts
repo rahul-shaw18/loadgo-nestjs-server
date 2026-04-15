@@ -253,4 +253,23 @@ export class TripsGateway
 
     this.offerManager.handleReject(this.server, driverId);
   }
+
+  @SubscribeMessage(EVENTS.TRIP_CANCELLED_BY_USER)
+  handleTripCancelledByUser(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { tripId: number; reason?: string; tag?: string },
+  ) {
+    this.logger.log(`[Event Emitted From User] ${EVENTS.TRIP_CANCELLED_BY_USER} via socket ${client.id} - Payload: ${JSON.stringify(payload)}`);
+    const { tripId } = payload;
+    const numericTripId = Number(tripId);
+
+    // Notify the entire room (including any assigned driver) that the trip was cancelled
+    this.server.to(this.connectionManager.tripRoom(numericTripId)).emit(
+      EVENTS.TRIP_CANCELLED_BY_USER,
+      payload,
+    );
+
+    // Clear offering queue for this cancelled trip so it stops reaching new drivers
+    this.offerManager.clearAllOffersForTrip(this.server, numericTripId);
+  }
 }
