@@ -74,6 +74,7 @@ export class TripsGateway
     @MessageBody()
     payload: { driverId: string | number; tripId?: string | number },
   ) {
+    this.logger.log(`Received ${EVENTS.REGISTER_DRIVER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
     const { driverId, tripId } = payload;
     if (!driverId) {
       this.logger.warn('REGISTER_DRIVER called without driverId');
@@ -99,6 +100,7 @@ export class TripsGateway
     @MessageBody()
     payload: { userId: string | number; tripId?: string | number },
   ) {
+    this.logger.log(`Received ${EVENTS.REGISTER_USER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
     const { userId, tripId } = payload;
     if (!userId) {
       this.logger.warn('REGISTER_USER called without userId');
@@ -118,6 +120,7 @@ export class TripsGateway
         this.logger.log(
           `User ${userId} joined room late; sync-pushing acceptance for trip ${numericTripId}`,
         );
+        this.logger.log(`Emitting ${EVENTS.TRIP_ACCEPTED} directly to user ${userId} (socket ${client.id}): ${JSON.stringify(cachedAcceptance)}`);
         client.emit(EVENTS.TRIP_ACCEPTED, cachedAcceptance);
       }
     } else {
@@ -130,6 +133,7 @@ export class TripsGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { tripId: number },
   ) {
+    this.logger.log(`Received ${EVENTS.TRIP_ACCEPTED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
     const { tripId } = payload;
     const numericTripId = Number(tripId);
     const driverId = this.findDriverIdBySocket(client.id);
@@ -186,6 +190,7 @@ export class TripsGateway
         // Ensure driver is in the room before emitting
         client.join(this.connectionManager.tripRoom(numericTripId));
 
+        this.logger.log(`Emitting ${EVENTS.TRIP_ACCEPTED} to room ${this.connectionManager.tripRoom(numericTripId)}: ${JSON.stringify({ tripId: numericTripId, driverId })}`);
         this.server
           .to(this.connectionManager.tripRoom(numericTripId))
           .emit(EVENTS.TRIP_ACCEPTED, {
@@ -229,6 +234,7 @@ export class TripsGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { tripId: number },
   ) {
+    this.logger.log(`Received ${EVENTS.TRIP_REJECTED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
     const { tripId } = payload;
     const numericTripId = Number(tripId);
     const driverId = this.findDriverIdBySocket(client.id);

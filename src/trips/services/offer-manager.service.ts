@@ -61,6 +61,7 @@ export class OfferManagerService {
       screenTimerId,
     };
 
+    this.logger.log(`Emitting ${EVENTS.INCOMING_TRIP} to driver ${id} (socket ${socketId}): ${JSON.stringify({ tripId: nextTrip.tripId, screenTimeout: Math.ceil(screenTimeMs / 1000) })}`);
     io.to(socketId).emit(EVENTS.INCOMING_TRIP, {
       tripId: nextTrip.tripId,
       screenTimeout: Math.ceil(screenTimeMs / 1000),
@@ -85,6 +86,7 @@ export class OfferManagerService {
 
     const socketId = this.connectionManager.getDriverSocketId(id);
     if (socketId) {
+      this.logger.log(`Emitting ${EVENTS.INCOMING_TRIP_EXPIRED} to driver ${id} (socket ${socketId}): ${JSON.stringify({ tripId: offer.tripId })}`);
       io.to(socketId).emit(EVENTS.INCOMING_TRIP_EXPIRED, {
         tripId: offer.tripId,
       });

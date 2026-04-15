@@ -53,6 +53,7 @@ export class TripsController {
     schema: { example: { ok: true } },
   })
   notifyNewTrip(@Body() payload: NotifyNewTripDto, @Res() res: Response) {
+    this.logger.log(`Received HTTP POST /notify-new-trip with payload: ${JSON.stringify(payload)}`);
     const { tripId, drivers, userId } = payload;
     const io = this.tripsGateway.server;
 
@@ -111,6 +112,7 @@ export class TripsController {
     schema: { example: { ok: false, message: 'Invalid status code: 99' } },
   })
   tripStatusUpdate(@Body() payload: TripStatusUpdateDto) {
+    this.logger.log(`Received HTTP POST /trip-status-update with payload: ${JSON.stringify(payload)}`);
     try {
       const { tripId, status, driverId, userId } = payload;
       const io = this.tripsGateway.server;
@@ -139,6 +141,7 @@ export class TripsController {
             tripId,
           );
 
+          this.logger.log(`Emitting ${EVENTS.TRIP_ACCEPTED} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId, driverId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_ACCEPTED,
             {
@@ -147,6 +150,7 @@ export class TripsController {
             },
           );
 
+          this.logger.log(`Emitting ${EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER} globally: ${JSON.stringify({ driverId, tripId })}`);
           io.emit(EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER, { driverId, tripId });
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
@@ -155,10 +159,12 @@ export class TripsController {
         case STATUS.REVOKED: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
+          this.logger.log(`Emitting ${EVENTS.TRIP_REVOKED} globally: ${JSON.stringify({ tripId })}`);
           io.emit(EVENTS.TRIP_REVOKED, { tripId });
           break;
         }
         case STATUS.STARTED: {
+          this.logger.log(`Emitting ${EVENTS.TRIP_STARTED} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId, driverId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_STARTED,
             {
@@ -169,6 +175,7 @@ export class TripsController {
           break;
         }
         case STATUS.COMPLETED: {
+          this.logger.log(`Emitting ${EVENTS.TRIP_COMPLETED} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_COMPLETED,
             {
@@ -180,28 +187,33 @@ export class TripsController {
         case STATUS.CANCELLED_BY_USER: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
+          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_USER} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_CANCELLED_BY_USER,
             {
               tripId,
             },
           );
+          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_USER} globally: ${JSON.stringify({ tripId })}`);
           io.emit(EVENTS.TRIP_CANCELLED_BY_USER, { tripId });
           break;
         }
         case STATUS.CANCELLED_BY_DRIVER: {
+          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_DRIVER} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_CANCELLED_BY_DRIVER,
             {
               tripId,
             },
           );
+          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_DRIVER} globally: ${JSON.stringify({ tripId })}`);
           io.emit(EVENTS.TRIP_CANCELLED_BY_DRIVER, { tripId });
           break;
         }
         case STATUS.REQUEST_TIMEOUT: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
+          this.logger.log(`Emitting ${EVENTS.TRIP_REVOKED} globally: ${JSON.stringify({ tripId })}`);
           io.emit(EVENTS.TRIP_REVOKED, { tripId });
           break;
         }
