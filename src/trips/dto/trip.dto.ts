@@ -60,3 +60,41 @@ export class TripStatusUpdateDto {
   @IsOptional()
   userId?: string | number;
 }
+
+export class DriverLocationDto {
+  @ApiProperty({
+    description: 'Trip the driver is currently serving',
+    example: 500,
+  })
+  @IsNumber()
+  @IsNotEmpty()
+  tripId: number;
+
+  @ApiProperty({ description: 'Latitude in decimal degrees', example: 28.6139 })
+  @IsNumber()
+  @IsNotEmpty()
+  latitude: number;
+
+  @ApiProperty({ description: 'Longitude in decimal degrees', example: 77.209 })
+  @IsNumber()
+  @IsNotEmpty()
+  longitude: number;
+
+  @ApiPropertyOptional({ description: 'Heading in degrees (0–360)', example: 90 })
+  @IsOptional()
+  @IsNumber()
+  heading?: number;
+
+  @ApiPropertyOptional({ description: 'Speed in km/h', example: 32.5 })
+  @IsOptional()
+  @IsNumber()
+  speed?: number;
+
+  @ApiPropertyOptional({
+    description: 'Client timestamp in milliseconds since epoch',
+    example: 1718870400000,
+  })
+  @IsOptional()
+  @IsNumber()
+  timestamp?: number;
+}
