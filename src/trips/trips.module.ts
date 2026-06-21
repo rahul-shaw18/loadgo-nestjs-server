@@ -7,6 +7,8 @@ import { OfferManagerService } from './services/offer-manager.service';
 import { BackendApiService } from './services/backend-api.service';
 import { LocationCacheService } from './services/location-cache.service';
 import { DisconnectGraceService } from './services/disconnect-grace.service';
+import { TripParticipantsService } from './services/trip-participants.service';
+import { TripEventEmitterService } from './services/trip-event-emitter.service';
 
 @Module({
   controllers: [TripsController],
@@ -18,6 +20,8 @@ import { DisconnectGraceService } from './services/disconnect-grace.service';
     BackendApiService,
     LocationCacheService,
     DisconnectGraceService,
+    TripParticipantsService,
+    TripEventEmitterService,
   ],
 })
 export class TripsModule {}

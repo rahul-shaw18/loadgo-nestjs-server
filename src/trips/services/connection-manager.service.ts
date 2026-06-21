@@ -63,23 +63,35 @@ export class ConnectionManagerService {
   // ─── Room operations ───
   joinDriverToTripRoom(io: Server, driverId: string | number, tripId: string | number) {
     const socketId = this.onlineDrivers[String(driverId)];
-    if (!socketId) return;
+    if (!socketId) {
+      this.logger.warn(
+        `Driver ${driverId} not online — cannot join room ${this.tripRoom(tripId)}`,
+      );
+      return;
+    }
 
     const socket = io.sockets.sockets.get(socketId);
     if (socket) {
-      socket.join(this.tripRoom(tripId));
-      this.logger.debug(`Driver ${driverId} joined room ${this.tripRoom(tripId)}`);
+      const room = this.tripRoom(tripId);
+      socket.join(room);
+      this.logger.log(`Driver ${driverId} joined room ${room} (socket: ${socketId})`);
     }
   }
 
   joinUserToTripRoom(io: Server, userId: string | number, tripId: string | number) {
     const socketId = this.onlineUsers[String(userId)];
-    if (!socketId) return;
+    if (!socketId) {
+      this.logger.warn(
+        `User ${userId} not online — cannot join room ${this.tripRoom(tripId)}`,
+      );
+      return;
+    }
 
     const socket = io.sockets.sockets.get(socketId);
     if (socket) {
-      socket.join(this.tripRoom(tripId));
-      this.logger.debug(`User ${userId} joined room ${this.tripRoom(tripId)}`);
+      const room = this.tripRoom(tripId);
+      socket.join(room);
+      this.logger.log(`User ${userId} joined room ${room} (socket: ${socketId})`);
     }
   }
 }

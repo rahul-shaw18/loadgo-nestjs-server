@@ -16,6 +16,8 @@ import { OfferManagerService } from '../services/offer-manager.service';
 import { BackendApiService } from '../services/backend-api.service';
 import { LocationCacheService } from '../services/location-cache.service';
 import { DisconnectGraceService } from '../services/disconnect-grace.service';
+import { TripParticipantsService } from '../services/trip-participants.service';
+import { TripEventEmitterService } from '../services/trip-event-emitter.service';
 import { EVENTS } from '../../config/events.constant';
 import { LOCATION_UPDATE_THROTTLE_MS } from '../../config/app.config';
 import { normalizeTripId, TripId, tripIdKey, tripIdsEqual } from '../utils/trip-id.util';
@@ -46,6 +48,8 @@ export class TripsGateway
     private readonly backendApi: BackendApiService,
     private readonly locationCache: LocationCacheService,
     private readonly disconnectGrace: DisconnectGraceService,
+    private readonly tripParticipants: TripParticipantsService,
+    private readonly tripEventEmitter: TripEventEmitterService,
   ) {}
 
   afterInit(server: Server) {
@@ -61,6 +65,9 @@ export class TripsGateway
     const userId = this.connectionManager.removeUserBySocketId(client.id);
 
     if (driverId) {
+      this.logger.log(
+        `[disconnect] Driver ${driverId} disconnected (socket ${client.id}) — scheduling grace cleanup`,
+      );
       this.offerManager.onDriverDisconnect(driverId);
       this.disconnectGrace.scheduleDriverCleanup(driverId, () => {
         this.offerManager.cleanupDriver(driverId);
@@ -68,7 +75,9 @@ export class TripsGateway
     }
 
     if (userId) {
-      this.logger.log(`User ${userId} disconnected`);
+      this.logger.log(
+        `[disconnect] User ${userId} disconnected (socket ${client.id})`,
+      );
     }
   }
 
@@ -89,20 +98,32 @@ export class TripsGateway
     userId: string | number,
     tripId: TripId,
   ) {
+    this.logger.log(
+      `[rejoin-sync] User ${userId} rejoined trip ${tripId} — checking cached state`,
+    );
+
     const cachedAcceptance = this.recentAcceptances.get(tripIdKey(tripId));
     if (cachedAcceptance) {
       this.logger.log(
-        `User ${userId} joined room late; sync-pushing acceptance for trip ${tripId}`,
+        `[rejoin-sync] Pushing ${EVENTS.TRIP_ACCEPTED} to user ${userId} for trip ${tripId}: ${JSON.stringify(cachedAcceptance)}`,
       );
       client.emit(EVENTS.TRIP_ACCEPTED, cachedAcceptance);
+    } else {
+      this.logger.log(
+        `[rejoin-sync] No cached acceptance for trip ${tripId} — user ${userId} will rely on room events or HTTP fetch`,
+      );
     }
 
     const lastLocation = this.locationCache.get(tripId);
     if (lastLocation) {
       this.logger.log(
-        `User ${userId} sync-pushing last known location for trip ${tripId}`,
+        `[rejoin-sync] Pushing ${EVENTS.DRIVER_LOCATION_UPDATE} to user ${userId} for trip ${tripId}: ${JSON.stringify(lastLocation)}`,
       );
       client.emit(EVENTS.DRIVER_LOCATION_UPDATE, lastLocation);
+    } else {
+      this.logger.log(
+        `[rejoin-sync] No cached location for trip ${tripId}`,
+      );
     }
   }
 
@@ -190,10 +211,17 @@ export class TripsGateway
       timestamp: payload.timestamp ?? now,
     };
 
-    this.logger.debug(
-      `Emitting ${EVENTS.DRIVER_LOCATION_UPDATE} to room ${room}: ${JSON.stringify(update)}`,
+    this.logger.log(
+      `[location] Emitting ${EVENTS.DRIVER_LOCATION_UPDATE} to room ${room} for trip ${tripId}`,
     );
-    this.server.to(room).emit(EVENTS.DRIVER_LOCATION_UPDATE, update);
+    this.tripEventEmitter.emitToTripRoom(
+      this.server,
+      tripId,
+      EVENTS.DRIVER_LOCATION_UPDATE,
+      update,
+      'driver-location',
+      { driverId },
+    );
     this.locationCache.set(tripId, update);
     this.backendApi.persistDriverLocation(update);
 
@@ -223,10 +251,10 @@ export class TripsGateway
     if (activeTripId) {
       client.join(this.connectionManager.tripRoom(activeTripId));
       this.logger.log(
-        `Driver ${driverId} joined active trip ${activeTripId}`,
+        `[rejoin] Driver ${driverId} joined active trip ${activeTripId} | ${this.tripEventEmitter.getRoomDebugInfo(this.server, activeTripId)}`,
       );
     } else {
-      this.logger.log(`Driver ${driverId} registered (no active trip)`);
+      this.logger.log(`[rejoin] Driver ${driverId} registered (no active trip)`);
     }
 
     // Trigger the offer flow for any trips that might be in their queue
@@ -254,10 +282,13 @@ export class TripsGateway
 
     if (activeTripId) {
       client.join(this.connectionManager.tripRoom(activeTripId));
-      this.logger.log(`User ${userId} joined trip room ${activeTripId}`);
+      this.logger.log(
+        `[rejoin] User ${userId} joined trip room ${activeTripId} | ${this.tripEventEmitter.getRoomDebugInfo(this.server, activeTripId)}`,
+      );
+      this.tripParticipants.setUser(activeTripId, userId);
       this.syncUserTripState(client, userId, activeTripId);
     } else {
-      this.logger.log(`User ${userId} registered (no active trip)`);
+      this.logger.log(`[rejoin] User ${userId} registered (no active trip)`);
     }
   }
 
@@ -288,42 +319,76 @@ export class TripsGateway
     }
 
     try {
+      this.logger.log(
+        `[accept] Confirming trip ${normalizedTripId} acceptance with backend for driver ${driverId}`,
+      );
       const accepted = await this.backendApi.confirmTripAcceptance(
         normalizedTripId,
         driverId,
       );
       if (!accepted) {
+        this.logger.warn(
+          `[accept] Backend rejected trip ${normalizedTripId} for driver ${driverId} — ${EVENTS.TRIP_ACCEPTED} will NOT be emitted`,
+        );
         this.driverQueue.removeTripFromDriver(driverId, normalizedTripId);
         this.offerManager.offerNextTrip(this.server, driverId);
         return;
       }
 
-      this.logger.log(
-        `Trip ${normalizedTripId} accepted by driver ${driverId} — confirmed by backend`,
-      );
+      this.tripParticipants.setDriver(normalizedTripId, driverId);
 
-      client.join(this.connectionManager.tripRoom(normalizedTripId));
-
-      this.logger.log(`Emitting ${EVENTS.TRIP_ACCEPTED} to room ${this.connectionManager.tripRoom(normalizedTripId)}: ${JSON.stringify({ tripId: normalizedTripId, driverId })}`);
-      this.server
-        .to(this.connectionManager.tripRoom(normalizedTripId))
-        .emit(EVENTS.TRIP_ACCEPTED, {
-          tripId: normalizedTripId,
-          driverId: driverId,
-        });
-
-      this.recentAcceptances.set(tripIdKey(normalizedTripId), {
+      const acceptPayload = {
         tripId: normalizedTripId,
         driverId,
-      });
+      };
+
+      this.tripEventEmitter.emitToTripRoom(
+        this.server,
+        normalizedTripId,
+        EVENTS.TRIP_ACCEPTED,
+        acceptPayload,
+        'socket-accept',
+        { driverId },
+      );
+
+      const participants = this.tripParticipants.get(normalizedTripId);
+      if (participants?.userId) {
+        this.tripEventEmitter.emitDirectToUser(
+          this.server,
+          participants.userId,
+          EVENTS.TRIP_ACCEPTED,
+          acceptPayload,
+          'socket-accept:fallback',
+        );
+      } else {
+        this.logger.warn(
+          `[accept] No userId registered for trip ${normalizedTripId} — user must rejoin or fetch via HTTP`,
+        );
+      }
+
+      this.recentAcceptances.set(tripIdKey(normalizedTripId), acceptPayload);
       setTimeout(
         () => {
           this.recentAcceptances.delete(tripIdKey(normalizedTripId));
+          this.logger.log(
+            `[accept] Cleared acceptance cache for trip ${normalizedTripId}`,
+          );
         },
         5 * 60 * 1000,
       );
 
+      this.tripEventEmitter.emitGlobally(
+        this.server,
+        EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER,
+        { driverId, tripId: normalizedTripId },
+        'socket-accept',
+      );
+
       this.offerManager.clearAllOffersForTrip(this.server, normalizedTripId);
+
+      this.logger.log(
+        `[accept] Trip ${normalizedTripId} acceptance complete | ${this.tripEventEmitter.getRoomDebugInfo(this.server, normalizedTripId)}`,
+      );
     } catch (err) {
       this.logger.error(
         `Failed to accept trip ${normalizedTripId}: ${err.message}`,
@@ -374,12 +439,19 @@ export class TripsGateway
       return;
     }
 
-    this.server.to(this.connectionManager.tripRoom(normalizedTripId)).emit(
+    this.tripEventEmitter.emitToTripRoom(
+      this.server,
+      normalizedTripId,
       EVENTS.TRIP_CANCELLED_BY_USER,
       { ...payload, tripId: normalizedTripId },
+      'user-cancel',
     );
 
     this.offerManager.clearAllOffersForTrip(this.server, normalizedTripId);
     this.locationCache.clear(normalizedTripId);
+    this.tripParticipants.clear(normalizedTripId);
+    this.logger.log(
+      `[user-cancel] Trip ${normalizedTripId} cancelled by user — tracking state cleared`,
+    );
   }
 }
