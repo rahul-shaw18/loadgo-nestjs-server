@@ -158,10 +158,24 @@ export class BackendApiService {
     );
 
     if (!result.ok) {
+      this.logger.warn(
+        `[backend] confirmTripAcceptance failed for trip ${tripId} driver ${driverId} — HTTP ${result.status ?? 'error'}`,
+      );
       return false;
     }
 
-    return result.data ? this.isSuccessResponse(result.data) : true;
+    const success = result.data ? this.isSuccessResponse(result.data) : true;
+    if (!success) {
+      this.logger.warn(
+        `[backend] confirmTripAcceptance rejected for trip ${tripId} driver ${driverId} — response=${JSON.stringify(result.data)}`,
+      );
+    } else {
+      this.logger.log(
+        `[backend] confirmTripAcceptance succeeded for trip ${tripId} driver ${driverId}`,
+      );
+    }
+
+    return success;
   }
 
   persistDriverLocation(payload: DriverLocationPayload): void {

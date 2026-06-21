@@ -4,7 +4,6 @@ import {
   Body,
   Logger,
   Res,
-  HttpStatus,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
@@ -12,6 +11,8 @@ import { DriverQueueService } from '../services/driver-queue.service';
 import { OfferManagerService } from '../services/offer-manager.service';
 import { ConnectionManagerService } from '../services/connection-manager.service';
 import { LocationCacheService } from '../services/location-cache.service';
+import { TripParticipantsService } from '../services/trip-participants.service';
+import { TripEventEmitterService } from '../services/trip-event-emitter.service';
 import { NotifyNewTripDto, TripStatusUpdateDto } from '../dto/trip.dto';
 import { TripId } from '../utils/trip-id.util';
 import { EVENTS } from '../../config/events.constant';
@@ -28,6 +29,17 @@ const STATUS = {
   REQUEST_TIMEOUT: 8,
 };
 
+const STATUS_LABELS: Record<number, string> = {
+  [STATUS.REQUESTED]: 'REQUESTED',
+  [STATUS.ACCEPTED]: 'ACCEPTED',
+  [STATUS.REVOKED]: 'REVOKED',
+  [STATUS.STARTED]: 'STARTED',
+  [STATUS.COMPLETED]: 'COMPLETED',
+  [STATUS.CANCELLED_BY_USER]: 'CANCELLED_BY_USER',
+  [STATUS.CANCELLED_BY_DRIVER]: 'CANCELLED_BY_DRIVER',
+  [STATUS.REQUEST_TIMEOUT]: 'REQUEST_TIMEOUT',
+};
+
 @ApiTags('Trips')
 @Controller()
 export class TripsController {
@@ -38,11 +50,15 @@ export class TripsController {
     private readonly offerManager: OfferManagerService,
     private readonly connectionManager: ConnectionManagerService,
     private readonly locationCache: LocationCacheService,
-    private readonly tripsGateway: TripsGateway, // Used to access the server
+    private readonly tripParticipants: TripParticipantsService,
+    private readonly tripEventEmitter: TripEventEmitterService,
+    private readonly tripsGateway: TripsGateway,
   ) {}
 
   private clearTripTrackingState(tripId: TripId) {
     this.locationCache.clear(tripId);
+    this.tripParticipants.clear(tripId);
+    this.logger.log(`Cleared tracking state for trip ${tripId}`);
   }
 
   @Post('notify-new-trip')
@@ -60,25 +76,33 @@ export class TripsController {
     schema: { example: { ok: true } },
   })
   notifyNewTrip(@Body() payload: NotifyNewTripDto, @Res() res: Response) {
-    this.logger.log(`Received HTTP POST /notify-new-trip with payload: ${JSON.stringify(payload)}`);
+    this.logger.log(
+      `[notify-new-trip] Received payload: ${JSON.stringify(payload)}`,
+    );
     const { tripId, drivers, userId } = payload;
     const io = this.tripsGateway.server;
 
-    // Join the user to the trip room immediately if they are online and the server is ready
+    if (userId) {
+      this.tripParticipants.setUser(tripId, userId);
+      this.logger.log(
+        `[notify-new-trip] Registered user ${userId} as participant for trip ${tripId}`,
+      );
+    }
+
     if (userId && io) {
       this.connectionManager.joinUserToTripRoom(io, userId, tripId);
+      this.logger.log(
+        `[notify-new-trip] ${this.tripEventEmitter.getRoomDebugInfo(io, tripId)}`,
+      );
     }
 
     this.logger.log(
-      `New trip ${tripId} → notifying ${drivers.length} driver(s): [${drivers.join(', ')}]`,
+      `[notify-new-trip] Trip ${tripId} → notifying ${drivers.length} driver(s): [${drivers.join(', ')}]`,
     );
 
-    // If socket server is not ready yet, we can't offer trips now.
-    // However, they are still added to the queue, and once drivers log in,
-    // they will catch up via the handleRegisterDriver logic.
     if (!io) {
       this.logger.warn(
-        `Socket.IO server not ready for trip ${tripId}. Drivers will catch up on login.`,
+        `[notify-new-trip] Socket.IO server not ready for trip ${tripId}. Drivers will catch up on login.`,
       );
       return res.json({ ok: true });
     }
@@ -119,46 +143,50 @@ export class TripsController {
     schema: { example: { ok: false, message: 'Invalid status code: 99' } },
   })
   tripStatusUpdate(@Body() payload: TripStatusUpdateDto) {
-    this.logger.log(`Received HTTP POST /trip-status-update with payload: ${JSON.stringify(payload)}`);
+    this.logger.log(
+      `[trip-status-update] Received payload: ${JSON.stringify(payload)}`,
+    );
     try {
       const { tripId, status, driverId, userId } = payload;
       const io = this.tripsGateway.server;
       const statusCode = Number(status);
+      const statusLabel = STATUS_LABELS[statusCode] ?? `UNKNOWN(${statusCode})`;
 
-      this.logger.log(`Trip status update: ${statusCode} for trip ${tripId}`);
+      this.logger.log(
+        `[trip-status-update] Processing ${statusLabel} for trip ${tripId} (driverId=${driverId ?? 'n/a'}, userId=${userId ?? 'n/a'})`,
+      );
 
-      // Defensive check: ensure socket server is available
       if (!io) {
         this.logger.error(
-          'Socket.IO server is not initialized in TripsGateway',
+          '[trip-status-update] Socket.IO server is not initialized in TripsGateway',
         );
         return { ok: false, message: 'Socket server not ready' };
       }
 
+      if (driverId) {
+        this.tripParticipants.setDriver(tripId, driverId);
+      }
+      if (userId) {
+        this.tripParticipants.setUser(tripId, userId);
+      }
+
       switch (statusCode) {
         case STATUS.ACCEPTED: {
-          this.connectionManager.joinDriverToTripRoom(
+          const acceptPayload = { tripId, driverId };
+          this.tripEventEmitter.emitToTripRoom(
             io,
-            driverId as string | number,
             tripId,
-          );
-          this.connectionManager.joinUserToTripRoom(
-            io,
-            userId as string | number,
-            tripId,
-          );
-
-          this.logger.log(`Emitting ${EVENTS.TRIP_ACCEPTED} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId, driverId })}`);
-          io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_ACCEPTED,
-            {
-              tripId,
-              driverId,
-            },
+            acceptPayload,
+            'trip-status-update:ACCEPTED',
+            { driverId, userId },
           );
-
-          this.logger.log(`Emitting ${EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER} globally: ${JSON.stringify({ driverId, tripId })}`);
-          io.emit(EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER, { driverId, tripId });
+          this.tripEventEmitter.emitGlobally(
+            io,
+            EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER,
+            { driverId, tripId },
+            'trip-status-update:ACCEPTED',
+          );
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
           break;
@@ -166,65 +194,84 @@ export class TripsController {
         case STATUS.REVOKED: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
-          this.logger.log(`Emitting ${EVENTS.TRIP_REVOKED} globally: ${JSON.stringify({ tripId })}`);
-          io.emit(EVENTS.TRIP_REVOKED, { tripId });
+          this.tripEventEmitter.emitGlobally(
+            io,
+            EVENTS.TRIP_REVOKED,
+            { tripId },
+            'trip-status-update:REVOKED',
+          );
           break;
         }
         case STATUS.STARTED: {
-          this.logger.log(`Emitting ${EVENTS.TRIP_STARTED} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId, driverId })}`);
-          io.to(this.connectionManager.tripRoom(tripId)).emit(
+          this.tripEventEmitter.emitToTripRoom(
+            io,
+            tripId,
             EVENTS.TRIP_STARTED,
-            {
-              tripId,
-              driverId,
-            },
+            { tripId, driverId },
+            'trip-status-update:STARTED',
+            { driverId, userId },
           );
           break;
         }
         case STATUS.COMPLETED: {
-          this.clearTripTrackingState(tripId);
-          this.logger.log(`Emitting ${EVENTS.TRIP_COMPLETED} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
-          io.to(this.connectionManager.tripRoom(tripId)).emit(
+          this.tripEventEmitter.emitToTripRoom(
+            io,
+            tripId,
             EVENTS.TRIP_COMPLETED,
-            {
-              tripId,
-            },
+            { tripId },
+            'trip-status-update:COMPLETED',
+            { driverId, userId },
           );
+          this.clearTripTrackingState(tripId);
           break;
         }
         case STATUS.CANCELLED_BY_USER: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
-          this.clearTripTrackingState(tripId);
-          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_USER} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
-          io.to(this.connectionManager.tripRoom(tripId)).emit(
+          this.tripEventEmitter.emitToTripRoom(
+            io,
+            tripId,
             EVENTS.TRIP_CANCELLED_BY_USER,
-            {
-              tripId,
-            },
+            { tripId },
+            'trip-status-update:CANCELLED_BY_USER',
+            { driverId, userId },
           );
-          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_USER} globally: ${JSON.stringify({ tripId })}`);
-          io.emit(EVENTS.TRIP_CANCELLED_BY_USER, { tripId });
+          this.tripEventEmitter.emitGlobally(
+            io,
+            EVENTS.TRIP_CANCELLED_BY_USER,
+            { tripId },
+            'trip-status-update:CANCELLED_BY_USER',
+          );
+          this.clearTripTrackingState(tripId);
           break;
         }
         case STATUS.CANCELLED_BY_DRIVER: {
-          this.clearTripTrackingState(tripId);
-          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_DRIVER} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
-          io.to(this.connectionManager.tripRoom(tripId)).emit(
+          this.tripEventEmitter.emitToTripRoom(
+            io,
+            tripId,
             EVENTS.TRIP_CANCELLED_BY_DRIVER,
-            {
-              tripId,
-            },
+            { tripId },
+            'trip-status-update:CANCELLED_BY_DRIVER',
+            { driverId, userId },
           );
-          this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_DRIVER} globally: ${JSON.stringify({ tripId })}`);
-          io.emit(EVENTS.TRIP_CANCELLED_BY_DRIVER, { tripId });
+          this.tripEventEmitter.emitGlobally(
+            io,
+            EVENTS.TRIP_CANCELLED_BY_DRIVER,
+            { tripId },
+            'trip-status-update:CANCELLED_BY_DRIVER',
+          );
+          this.clearTripTrackingState(tripId);
           break;
         }
         case STATUS.REQUEST_TIMEOUT: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
-          this.logger.log(`Emitting ${EVENTS.TRIP_REVOKED} globally: ${JSON.stringify({ tripId })}`);
-          io.emit(EVENTS.TRIP_REVOKED, { tripId });
+          this.tripEventEmitter.emitGlobally(
+            io,
+            EVENTS.TRIP_REVOKED,
+            { tripId },
+            'trip-status-update:REQUEST_TIMEOUT',
+          );
           break;
         }
         default: {
@@ -232,10 +279,13 @@ export class TripsController {
         }
       }
 
+      this.logger.log(
+        `[trip-status-update] Completed ${statusLabel} for trip ${tripId}`,
+      );
       return { ok: true };
     } catch (error) {
       this.logger.error(
-        `Error in tripStatusUpdate: ${error.message}`,
+        `[trip-status-update] Error: ${error.message}`,
         error.stack,
       );
       return {
