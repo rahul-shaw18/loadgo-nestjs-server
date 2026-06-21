@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { BACKGROUND_TIMER_MS } from '../../config/app.config';
+import { TripId, tripIdsEqual } from '../utils/trip-id.util';
 
 interface QueueEntry {
-  tripId: number;
+  tripId: TripId;
   addedAt: number;
   bgExpireAt: number;
 }
@@ -35,13 +36,13 @@ export class DriverQueueService {
   }
 
   // ─── Public API ───
-  addTripToDriver(driverId: string | number, tripId: number): boolean {
+  addTripToDriver(driverId: string | number, tripId: TripId): boolean {
     const id = String(driverId);
     if (!this.driverQueues[id]) {
       this.driverQueues[id] = [];
     }
 
-    if (this.driverQueues[id].some((entry) => Number(entry.tripId) === Number(tripId))) {
+    if (this.driverQueues[id].some((entry) => tripIdsEqual(entry.tripId, tripId))) {
       return false;
     }
 
@@ -58,25 +59,25 @@ export class DriverQueueService {
     return true;
   }
 
-  removeTripFromDriver(driverId: string | number, tripId: number) {
+  removeTripFromDriver(driverId: string | number, tripId: TripId) {
     const id = String(driverId);
     if (!this.driverQueues[id]) return;
     this.driverQueues[id] = this.driverQueues[id].filter(
-      (entry) => Number(entry.tripId) !== Number(tripId),
+      (entry) => !tripIdsEqual(entry.tripId, tripId),
     );
   }
 
-  removeTripFromAllDrivers(tripId: number): string[] {
+  removeTripFromAllDrivers(tripId: TripId): string[] {
     const affectedDrivers: string[] = [];
 
     for (const driverId of Object.keys(this.driverQueues)) {
-      const hadTrip = this.driverQueues[driverId].some(
-        (entry) => Number(entry.tripId) === Number(tripId),
+      const hadTrip = this.driverQueues[driverId].some((entry) =>
+        tripIdsEqual(entry.tripId, tripId),
       );
 
       if (hadTrip) {
         this.driverQueues[driverId] = this.driverQueues[driverId].filter(
-          (entry) => Number(entry.tripId) !== Number(tripId),
+          (entry) => !tripIdsEqual(entry.tripId, tripId),
         );
         affectedDrivers.push(driverId);
       }
@@ -133,10 +134,10 @@ export class DriverQueueService {
     return (this.driverQueues[id] || []).length;
   }
 
-  hasTripInQueue(driverId: string | number, tripId: number): boolean {
+  hasTripInQueue(driverId: string | number, tripId: TripId): boolean {
     const id = String(driverId);
     if (!this.driverQueues[id]) return false;
-    return this.driverQueues[id].some((entry) => Number(entry.tripId) === Number(tripId));
+    return this.driverQueues[id].some((entry) => tripIdsEqual(entry.tripId, tripId));
   }
 
   clearDriver(driverId: string | number) {
@@ -145,11 +146,11 @@ export class DriverQueueService {
     this.logger.log(`Queue cleared for driver ${id}`);
   }
 
-  getDriversWithTrip(tripId: number): string[] {
+  getDriversWithTrip(tripId: TripId): string[] {
     return Object.keys(this.driverQueues).filter(
       (driverId) =>
         this.driverQueues[driverId] &&
-        this.driverQueues[driverId].some((entry) => Number(entry.tripId) === Number(tripId)),
+        this.driverQueues[driverId].some((entry) => tripIdsEqual(entry.tripId, tripId)),
     );
   }
 }

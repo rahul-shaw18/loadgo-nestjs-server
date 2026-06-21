@@ -3,6 +3,7 @@
 export const EVENTS = {
   // ─── Driver ↔ Server (socket) ───────────────────────────────────────────────
   REGISTER_DRIVER: 'REGISTER_DRIVER',
+  DRIVER_LOCATION: 'DRIVER_LOCATION',
 
   // ─── Server → Driver (socket) ──────────────────────────────────────────────
   INCOMING_TRIP: 'INCOMING_TRIP',
@@ -23,4 +24,7 @@ export const EVENTS = {
 
   // ─── Sub-events for cancellation context ────────────────────────────────────
   TRIP_ACCEPTED_BY_OTHER_DRIVER: 'TRIP_ACCEPTED_BY_OTHER_DRIVER',
+
+  // ─── Live driver tracking (trip room broadcast) ─────────────────────────────
+  DRIVER_LOCATION_UPDATE: 'DRIVER_LOCATION_UPDATE',
 };

@@ -4,9 +4,10 @@ import { SCREEN_TIMER_MS, ROTATION_GAP_MS } from '../../config/app.config';
 import { EVENTS } from '../../config/events.constant';
 import { DriverQueueService } from './driver-queue.service';
 import { ConnectionManagerService } from './connection-manager.service';
+import { TripId, tripIdsEqual } from '../utils/trip-id.util';
 
 interface ActiveOffer {
-  tripId: number;
+  tripId: TripId;
   screenTimerId: NodeJS.Timeout;
 }
 
@@ -118,11 +119,11 @@ export class OfferManagerService {
     return !!this.activeOffers[String(driverId)];
   }
 
-  clearAllOffersForTrip(io: Server, tripId: number) {
+  clearAllOffersForTrip(io: Server, tripId: TripId) {
     const affectedDrivers: string[] = [];
 
     for (const driverId of Object.keys(this.activeOffers)) {
-      if (this.activeOffers[driverId].tripId === tripId) {
+      if (tripIdsEqual(this.activeOffers[driverId].tripId, tripId)) {
         this.clearOffer(driverId);
         affectedDrivers.push(driverId);
       }
@@ -158,12 +159,12 @@ export class OfferManagerService {
 
   handleAccept(
     driverId: string | number,
-    tripId: number,
-  ): { valid: boolean; tripId: number | null } {
+    tripId: TripId,
+  ): { valid: boolean; tripId: TripId | null } {
     const id = String(driverId);
     const offer = this.activeOffers[id];
 
-    if (!offer || Number(offer.tripId) !== Number(tripId)) {
+    if (!offer || !tripIdsEqual(offer.tripId, tripId)) {
       this.logger.warn(
         `Driver ${id} tried to accept trip ${tripId} ` +
           `but current offer is ${offer ? offer.tripId : 'none'}`,
@@ -182,5 +183,12 @@ export class OfferManagerService {
     this.clearOffer(id);
     this.driverQueue.clearDriver(id);
     this.logger.log(`Full cleanup done for driver ${id}`);
+  }
+
+  onDriverDisconnect(driverId: string | number) {
+    this.clearOffer(driverId);
+    this.logger.log(
+      `Driver ${driverId} disconnected — offer cleared, queue preserved`,
+    );
   }
 }

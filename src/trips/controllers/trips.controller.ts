@@ -11,7 +11,9 @@ import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { DriverQueueService } from '../services/driver-queue.service';
 import { OfferManagerService } from '../services/offer-manager.service';
 import { ConnectionManagerService } from '../services/connection-manager.service';
+import { LocationCacheService } from '../services/location-cache.service';
 import { NotifyNewTripDto, TripStatusUpdateDto } from '../dto/trip.dto';
+import { TripId } from '../utils/trip-id.util';
 import { EVENTS } from '../../config/events.constant';
 import { TripsGateway } from '../gateways/trips.gateway';
 
@@ -35,8 +37,13 @@ export class TripsController {
     private readonly driverQueue: DriverQueueService,
     private readonly offerManager: OfferManagerService,
     private readonly connectionManager: ConnectionManagerService,
+    private readonly locationCache: LocationCacheService,
     private readonly tripsGateway: TripsGateway, // Used to access the server
   ) {}
+
+  private clearTripTrackingState(tripId: TripId) {
+    this.locationCache.clear(tripId);
+  }
 
   @Post('notify-new-trip')
   @ApiOperation({
@@ -175,6 +182,7 @@ export class TripsController {
           break;
         }
         case STATUS.COMPLETED: {
+          this.clearTripTrackingState(tripId);
           this.logger.log(`Emitting ${EVENTS.TRIP_COMPLETED} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_COMPLETED,
@@ -187,6 +195,7 @@ export class TripsController {
         case STATUS.CANCELLED_BY_USER: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
+          this.clearTripTrackingState(tripId);
           this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_USER} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_CANCELLED_BY_USER,
@@ -199,6 +208,7 @@ export class TripsController {
           break;
         }
         case STATUS.CANCELLED_BY_DRIVER: {
+          this.clearTripTrackingState(tripId);
           this.logger.log(`Emitting ${EVENTS.TRIP_CANCELLED_BY_DRIVER} to room ${this.connectionManager.tripRoom(tripId)}: ${JSON.stringify({ tripId })}`);
           io.to(this.connectionManager.tripRoom(tripId)).emit(
             EVENTS.TRIP_CANCELLED_BY_DRIVER,

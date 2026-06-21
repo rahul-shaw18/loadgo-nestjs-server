@@ -4,6 +4,9 @@ import { TripsGateway } from './gateways/trips.gateway';
 import { ConnectionManagerService } from './services/connection-manager.service';
 import { DriverQueueService } from './services/driver-queue.service';
 import { OfferManagerService } from './services/offer-manager.service';
+import { BackendApiService } from './services/backend-api.service';
+import { LocationCacheService } from './services/location-cache.service';
+import { DisconnectGraceService } from './services/disconnect-grace.service';
 
 @Module({
   controllers: [TripsController],
@@ -12,6 +15,9 @@ import { OfferManagerService } from './services/offer-manager.service';
     ConnectionManagerService,
     DriverQueueService,
     OfferManagerService,
+    BackendApiService,
+    LocationCacheService,
+    DisconnectGraceService,
   ],
 })
 export class TripsModule {}
