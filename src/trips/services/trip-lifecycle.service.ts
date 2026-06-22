@@ -6,6 +6,7 @@ import { LocationCacheService } from './location-cache.service';
 import { OfferManagerService } from './offer-manager.service';
 import { TripEventEmitterService } from './trip-event-emitter.service';
 import { BackendApiService } from './backend-api.service';
+import { DriverStateService } from './driver-state.service';
 import { TripId } from '../utils/trip-id.util';
 
 export interface SocketAck {
@@ -24,6 +25,7 @@ export class TripLifecycleService {
     private readonly offerManager: OfferManagerService,
     private readonly tripEventEmitter: TripEventEmitterService,
     private readonly backendApi: BackendApiService,
+    private readonly driverState: DriverStateService,
   ) {}
 
   validateDriverTripRoom(
@@ -87,6 +89,9 @@ export class TripLifecycleService {
       terminal?: boolean;
       clearOffers?: boolean;
       reason?: string;
+      vehicleNo?: string;
+      driversFeedback?: string;
+      usersRating?: number;
     },
   ): Promise<SocketAck> {
     const roomError = this.validateDriverTripRoom(
@@ -110,6 +115,9 @@ export class TripLifecycleService {
       status: params.status,
       driverId: params.driverId,
       reason: params.reason,
+      vehicleNo: params.vehicleNo ?? this.driverState.getVehicleNo(params.driverId),
+      driversFeedback: params.driversFeedback,
+      usersRating: params.usersRating,
     });
 
     if (!updated) {
@@ -131,11 +139,16 @@ export class TripLifecycleService {
     );
 
     if (params.clearOffers) {
-      this.offerManager.clearAllOffersForTrip(io, params.tripId);
+      this.offerManager.clearAllOffersForTrip(
+        io,
+        params.tripId,
+        params.driverId,
+      );
     }
 
     if (params.terminal) {
       this.cleanupTerminalTrip(io, params.tripId);
+      this.driverState.setOnline(params.driverId);
       this.logger.log(
         `[${params.context}] Terminal cleanup complete for trip ${params.tripId}`,
       );
@@ -204,6 +217,11 @@ export class TripLifecycleService {
 
     this.offerManager.clearAllOffersForTrip(io, params.tripId);
     this.cleanupTerminalTrip(io, params.tripId);
+
+    const participants = this.tripParticipants.get(params.tripId);
+    if (participants?.driverId) {
+      this.driverState.setOnline(participants.driverId);
+    }
 
     this.logger.log(
       `[${params.context}] ${params.event} complete | ${this.tripEventEmitter.getRoomDebugInfo(io, params.tripId)}`,

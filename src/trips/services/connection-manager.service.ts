@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
 
 @Injectable()
 export class ConnectionManagerService {
@@ -12,6 +12,10 @@ export class ConnectionManagerService {
   // Room helper
   tripRoom(tripId: number | string): string {
     return `trip_${tripId}`;
+  }
+
+  driverRoom(driverId: string | number): string {
+    return `driver_${driverId}`;
   }
 
   // ─── Driver methods ───
@@ -81,6 +85,23 @@ export class ConnectionManagerService {
   }
 
   // ─── Room operations ───
+  joinDriverPersonalRoom(
+    io: Server,
+    driverId: string | number,
+    socket?: Socket,
+  ): void {
+    const room = this.driverRoom(driverId);
+    const targetSocket =
+      socket ?? io.sockets.sockets.get(this.onlineDrivers[String(driverId)]);
+
+    if (targetSocket) {
+      targetSocket.join(room);
+      this.logger.log(
+        `Driver ${driverId} joined personal room ${room} (socket: ${targetSocket.id})`,
+      );
+    }
+  }
+
   joinDriverToTripRoom(io: Server, driverId: string | number, tripId: string | number) {
     const socketId = this.onlineDrivers[String(driverId)];
     if (!socketId) {

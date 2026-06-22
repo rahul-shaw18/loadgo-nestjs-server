@@ -24,6 +24,9 @@ export interface UpdateTripStatusParams {
   driverId?: string | number;
   userId?: string | number;
   reason?: string;
+  vehicleNo?: string;
+  driversFeedback?: string;
+  usersRating?: number;
 }
 
 const STATUS_LABELS: Record<number, string> = {
@@ -159,16 +162,28 @@ export class BackendApiService {
   }
 
   async updateTripStatus(params: UpdateTripStatusParams): Promise<boolean> {
-    const { tripId, status, driverId, userId, reason } = params;
+    const {
+      tripId,
+      status,
+      driverId,
+      userId,
+      reason,
+      vehicleNo,
+      driversFeedback,
+      usersRating,
+    } = params;
     const statusLabel = STATUS_LABELS[status] ?? `STATUS_${status}`;
 
     const body: Record<string, unknown> = {
       id: tripId,
-      status,
+      status: String(status),
     };
     if (driverId !== undefined) body.driverId = driverId;
     if (userId !== undefined) body.userId = userId;
     if (reason !== undefined) body.reason = reason;
+    if (vehicleNo !== undefined) body.vehicleNo = vehicleNo;
+    if (driversFeedback !== undefined) body.driversFeedback = driversFeedback;
+    if (usersRating !== undefined) body.usersRating = usersRating;
 
     const result = await this.request<Record<string, unknown>>(
       BACKEND_ENDPOINTS.PATCH_LIVE_TRIP,
