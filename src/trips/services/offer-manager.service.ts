@@ -4,6 +4,7 @@ import { SCREEN_TIMER_MS, ROTATION_GAP_MS } from '../../config/app.config';
 import { EVENTS } from '../../config/events.constant';
 import { DriverQueueService } from './driver-queue.service';
 import { ConnectionManagerService } from './connection-manager.service';
+import { DriverStateService } from './driver-state.service';
 import { TripId, tripIdsEqual } from '../utils/trip-id.util';
 
 interface ActiveOffer {
@@ -15,16 +16,23 @@ interface ActiveOffer {
 export class OfferManagerService {
   private readonly logger = new Logger(OfferManagerService.name);
 
-  // State
   private activeOffers: Record<string, ActiveOffer> = {};
 
   constructor(
     private readonly driverQueue: DriverQueueService,
     private readonly connectionManager: ConnectionManagerService,
+    private readonly driverState: DriverStateService,
   ) {}
 
   offerNextTrip(io: Server, driverId: string | number) {
     const id = String(driverId);
+
+    if (!this.driverState.canReceiveOffers(id)) {
+      this.logger.debug(
+        `Driver ${id} is on an active trip — skipping new offers`,
+      );
+      return;
+    }
 
     if (this.activeOffers[id]) {
       this.logger.debug(`Driver ${id} already has an active offer, skipping`);
@@ -62,7 +70,9 @@ export class OfferManagerService {
       screenTimerId,
     };
 
-    this.logger.log(`Emitting ${EVENTS.INCOMING_TRIP} to driver ${id} (socket ${socketId}): ${JSON.stringify({ tripId: nextTrip.tripId, screenTimeout: Math.ceil(screenTimeMs / 1000) })}`);
+    this.logger.log(
+      `Emitting ${EVENTS.INCOMING_TRIP} to driver ${id} (socket ${socketId}): ${JSON.stringify({ tripId: nextTrip.tripId, screenTimeout: Math.ceil(screenTimeMs / 1000) })}`,
+    );
     io.to(socketId).emit(EVENTS.INCOMING_TRIP, {
       tripId: nextTrip.tripId,
       screenTimeout: Math.ceil(screenTimeMs / 1000),
@@ -81,13 +91,23 @@ export class OfferManagerService {
     const offer = this.activeOffers[id];
     if (!offer) return;
 
+    if (this.driverState.isAssigneeForTrip(id, offer.tripId)) {
+      this.logger.log(
+        `Skipping ${EVENTS.INCOMING_TRIP_EXPIRED} — driver ${id} is assignee for trip ${offer.tripId}`,
+      );
+      delete this.activeOffers[id];
+      return;
+    }
+
     this.logger.log(
       `Screen timer expired for driver ${id} on trip ${offer.tripId}`,
     );
 
     const socketId = this.connectionManager.getDriverSocketId(id);
-    if (socketId) {
-      this.logger.log(`Emitting ${EVENTS.INCOMING_TRIP_EXPIRED} to driver ${id} (socket ${socketId}): ${JSON.stringify({ tripId: offer.tripId })}`);
+    if (socketId && this.driverState.canReceiveOffers(id)) {
+      this.logger.log(
+        `Emitting ${EVENTS.INCOMING_TRIP_EXPIRED} to driver ${id} (socket ${socketId}): ${JSON.stringify({ tripId: offer.tripId })}`,
+      );
       io.to(socketId).emit(EVENTS.INCOMING_TRIP_EXPIRED, {
         tripId: offer.tripId,
       });
@@ -96,9 +116,11 @@ export class OfferManagerService {
     delete this.activeOffers[id];
     this.driverQueue.rotateCurrentTrip(id);
 
-    setTimeout(() => {
-      this.offerNextTrip(io, id);
-    }, ROTATION_GAP_MS);
+    if (this.driverState.canReceiveOffers(id)) {
+      setTimeout(() => {
+        this.offerNextTrip(io, id);
+      }, ROTATION_GAP_MS);
+    }
   }
 
   clearOffer(driverId: string | number) {
@@ -119,25 +141,42 @@ export class OfferManagerService {
     return !!this.activeOffers[String(driverId)];
   }
 
-  clearAllOffersForTrip(io: Server, tripId: TripId) {
+  clearAllOffersForTrip(
+    io: Server,
+    tripId: TripId,
+    assigneeDriverId?: string | number,
+  ) {
     const affectedDrivers: string[] = [];
 
     for (const driverId of Object.keys(this.activeOffers)) {
-      if (tripIdsEqual(this.activeOffers[driverId].tripId, tripId)) {
-        this.clearOffer(driverId);
-        affectedDrivers.push(driverId);
+      if (!tripIdsEqual(this.activeOffers[driverId].tripId, tripId)) {
+        continue;
       }
+
+      if (
+        assigneeDriverId !== undefined &&
+        String(driverId) === String(assigneeDriverId)
+      ) {
+        this.clearOffer(driverId);
+        continue;
+      }
+
+      this.clearOffer(driverId);
+      affectedDrivers.push(driverId);
     }
+
+    this.driverQueue.removeTripFromAllDrivers(tripId);
 
     if (affectedDrivers.length > 0) {
       this.logger.log(
-        `Cleared offers for trip ${tripId} from ${affectedDrivers.length} driver(s), ` +
-          `will offer next trip after ${ROTATION_GAP_MS}ms gap`,
+        `Cleared offers for trip ${tripId} from ${affectedDrivers.length} driver(s)`,
       );
 
       setTimeout(() => {
         affectedDrivers.forEach((id) => {
-          this.offerNextTrip(io, id);
+          if (this.driverState.canReceiveOffers(id)) {
+            this.offerNextTrip(io, id);
+          }
         });
       }, ROTATION_GAP_MS);
     }
@@ -182,11 +221,13 @@ export class OfferManagerService {
     const id = String(driverId);
     this.clearOffer(id);
     this.driverQueue.clearDriver(id);
+    this.driverState.setOffline(id);
     this.logger.log(`Full cleanup done for driver ${id}`);
   }
 
   onDriverDisconnect(driverId: string | number) {
     this.clearOffer(driverId);
+    this.driverState.setOffline(driverId);
     this.logger.log(
       `Driver ${driverId} disconnected — offer cleared, queue preserved`,
     );

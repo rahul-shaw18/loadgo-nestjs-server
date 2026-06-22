@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Server } from 'socket.io';
 import { ConnectionManagerService } from './connection-manager.service';
 import { TripParticipantsService } from './trip-participants.service';
+import { EVENTS } from '../../config/events.constant';
 import { TripId, tripIdKey } from '../utils/trip-id.util';
 
 @Injectable()
@@ -128,6 +129,29 @@ export class TripEventEmitterService {
       `[${context}] Direct-emit ${event} → driver ${driverId} (socket ${socketId}) | payload=${JSON.stringify(payload)}`,
     );
     io.to(socketId).emit(event, payload);
+  }
+
+  emitAcceptedByOtherDrivers(
+    io: Server,
+    tripId: TripId,
+    assigneeDriverId: string | number,
+    context: string,
+  ): void {
+    const payload = { driverId: assigneeDriverId, tripId };
+
+    for (const driverId of this.connectionManager.getAllDriverIds()) {
+      if (String(driverId) === String(assigneeDriverId)) {
+        continue;
+      }
+
+      this.emitDirectToDriver(
+        io,
+        driverId,
+        EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER,
+        payload,
+        context,
+      );
+    }
   }
 
   emitGlobally(

@@ -10,6 +10,7 @@ import { DisconnectGraceService } from './services/disconnect-grace.service';
 import { TripParticipantsService } from './services/trip-participants.service';
 import { TripEventEmitterService } from './services/trip-event-emitter.service';
 import { TripLifecycleService } from './services/trip-lifecycle.service';
+import { DriverStateService } from './services/driver-state.service';
 
 @Module({
   controllers: [TripsController],
@@ -24,6 +25,7 @@ import { TripLifecycleService } from './services/trip-lifecycle.service';
     TripParticipantsService,
     TripEventEmitterService,
     TripLifecycleService,
+    DriverStateService,
   ],
 })
 export class TripsModule {}

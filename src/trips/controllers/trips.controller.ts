@@ -13,6 +13,7 @@ import { ConnectionManagerService } from '../services/connection-manager.service
 import { LocationCacheService } from '../services/location-cache.service';
 import { TripParticipantsService } from '../services/trip-participants.service';
 import { TripEventEmitterService } from '../services/trip-event-emitter.service';
+import { DriverStateService } from '../services/driver-state.service';
 import { NotifyNewTripDto, TripStatusUpdateDto } from '../dto/trip.dto';
 import { TripId } from '../utils/trip-id.util';
 import { EVENTS } from '../../config/events.constant';
@@ -52,6 +53,7 @@ export class TripsController {
     private readonly locationCache: LocationCacheService,
     private readonly tripParticipants: TripParticipantsService,
     private readonly tripEventEmitter: TripEventEmitterService,
+    private readonly driverState: DriverStateService,
     private readonly tripsGateway: TripsGateway,
   ) {}
 
@@ -108,6 +110,13 @@ export class TripsController {
     }
 
     drivers.forEach((driverId) => {
+      if (!this.driverState.canReceiveOffers(driverId)) {
+        this.logger.log(
+          `[notify-new-trip] Skipping driver ${driverId} — on active trip`,
+        );
+        return;
+      }
+
       const added = this.driverQueue.addTripToDriver(driverId, tripId);
 
       if (added && !this.offerManager.hasOffer(driverId)) {
@@ -172,6 +181,9 @@ export class TripsController {
 
       switch (statusCode) {
         case STATUS.ACCEPTED: {
+          if (driverId) {
+            this.driverState.setOnTrip(driverId, tripId);
+          }
           const acceptPayload = { tripId, driverId };
           this.tripEventEmitter.emitToTripRoom(
             io,
@@ -181,14 +193,15 @@ export class TripsController {
             'trip-status-update:ACCEPTED',
             { driverId, userId },
           );
-          this.tripEventEmitter.emitGlobally(
-            io,
-            EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER,
-            { driverId, tripId },
-            'trip-status-update:ACCEPTED',
-          );
-          this.driverQueue.removeTripFromAllDrivers(tripId);
-          this.offerManager.clearAllOffersForTrip(io, tripId);
+          if (driverId) {
+            this.tripEventEmitter.emitAcceptedByOtherDrivers(
+              io,
+              tripId,
+              driverId,
+              'trip-status-update:ACCEPTED',
+            );
+          }
+          this.offerManager.clearAllOffersForTrip(io, tripId, driverId);
           break;
         }
         case STATUS.REVOKED: {
@@ -214,6 +227,9 @@ export class TripsController {
           break;
         }
         case STATUS.COMPLETED: {
+          if (driverId) {
+            this.driverState.setOnline(driverId);
+          }
           this.tripEventEmitter.emitToTripRoom(
             io,
             tripId,
@@ -226,6 +242,9 @@ export class TripsController {
           break;
         }
         case STATUS.CANCELLED_BY_USER: {
+          if (driverId) {
+            this.driverState.setOnline(driverId);
+          }
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
           this.tripEventEmitter.emitToTripRoom(
@@ -246,6 +265,9 @@ export class TripsController {
           break;
         }
         case STATUS.CANCELLED_BY_DRIVER: {
+          if (driverId) {
+            this.driverState.setOnline(driverId);
+          }
           this.tripEventEmitter.emitToTripRoom(
             io,
             tripId,

@@ -19,6 +19,7 @@ import { DisconnectGraceService } from '../services/disconnect-grace.service';
 import { TripParticipantsService } from '../services/trip-participants.service';
 import { TripEventEmitterService } from '../services/trip-event-emitter.service';
 import { TripLifecycleService, SocketAck } from '../services/trip-lifecycle.service';
+import { DriverStateService } from '../services/driver-state.service';
 import { EVENTS } from '../../config/events.constant';
 import { LOCATION_UPDATE_THROTTLE_MS, TRIP_STATUS } from '../../config/app.config';
 import { normalizeTripId, TripId, tripIdKey, tripIdsEqual } from '../utils/trip-id.util';
@@ -52,6 +53,7 @@ export class TripsGateway
     private readonly tripParticipants: TripParticipantsService,
     private readonly tripEventEmitter: TripEventEmitterService,
     private readonly tripLifecycle: TripLifecycleService,
+    private readonly driverState: DriverStateService,
   ) {}
 
   afterInit(server: Server) {
@@ -169,6 +171,16 @@ export class TripsGateway
     return socketUserId;
   }
 
+  private cacheVehicleNo(
+    driverId: string,
+    vehicleNo?: string,
+  ): string | undefined {
+    if (vehicleNo) {
+      this.driverState.setVehicleNo(driverId, vehicleNo);
+    }
+    return vehicleNo ?? this.driverState.getVehicleNo(driverId);
+  }
+
   private isValidCoordinate(latitude: number, longitude: number): boolean {
     return (
       Number.isFinite(latitude) &&
@@ -265,7 +277,7 @@ export class TripsGateway
   async handleRegisterDriver(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    payload: { driverId: string | number; tripId?: string | number },
+    payload: { driverId: string | number; tripId?: string | number | null },
   ) {
     this.logger.log(`Received ${EVENTS.REGISTER_DRIVER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
     const { driverId, tripId } = payload;
@@ -275,23 +287,33 @@ export class TripsGateway
     }
 
     this.connectionManager.addDriver(driverId, client.id);
+    this.connectionManager.joinDriverPersonalRoom(this.server, driverId, client);
     this.disconnectGrace.cancelDriverCleanup(driverId);
 
-    const activeTripId = await this.resolveActiveTripId(tripId, () =>
-      this.backendApi.fetchDriverActiveTrip(driverId),
+    const activeTripId = await this.resolveActiveTripId(
+      tripId ?? undefined,
+      () => this.backendApi.fetchDriverActiveTrip(driverId),
     );
 
     if (activeTripId) {
       client.join(this.connectionManager.tripRoom(activeTripId));
+      this.driverState.setOnTrip(driverId, activeTripId);
+      this.tripParticipants.setDriver(activeTripId, driverId);
       this.logger.log(
         `[rejoin] Driver ${driverId} joined active trip ${activeTripId} | ${this.tripEventEmitter.getRoomDebugInfo(this.server, activeTripId)}`,
       );
     } else {
+      this.driverState.setOnline(driverId);
       this.logger.log(`[rejoin] Driver ${driverId} registered (no active trip)`);
     }
 
-    // Trigger the offer flow for any trips that might be in their queue
-    this.offerManager.offerNextTrip(this.server, driverId);
+    if (this.driverState.canReceiveOffers(driverId)) {
+      this.offerManager.offerNextTrip(this.server, driverId);
+    } else {
+      this.logger.log(
+        `[rejoin] Driver ${driverId} on active trip — skipping offer flow`,
+      );
+    }
   }
 
   @SubscribeMessage(EVENTS.REGISTER_USER)
@@ -328,7 +350,12 @@ export class TripsGateway
   @SubscribeMessage(EVENTS.TRIP_ACCEPTED)
   async handleAcceptOffer(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { tripId: number | string; driverId?: string | number },
+    @MessageBody()
+    payload: {
+      tripId: number | string;
+      driverId?: string | number;
+      vehicleNo?: string;
+    },
   ): Promise<SocketAck> {
     this.logger.log(`Received ${EVENTS.TRIP_ACCEPTED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
     const normalizedTripId = normalizeTripId(payload?.tripId);
@@ -352,10 +379,13 @@ export class TripsGateway
     }
 
     try {
+      const vehicleNo = this.cacheVehicleNo(driverId, payload.vehicleNo);
+
       const accepted = await this.backendApi.updateTripStatus({
         tripId: normalizedTripId,
         status: TRIP_STATUS.ACCEPTED,
         driverId,
+        vehicleNo,
       });
 
       if (!accepted) {
@@ -363,14 +393,17 @@ export class TripsGateway
           `[accept] Backend rejected trip ${normalizedTripId} for driver ${driverId} — ${EVENTS.TRIP_ACCEPTED} will NOT be emitted`,
         );
         this.driverQueue.removeTripFromDriver(driverId, normalizedTripId);
-        this.offerManager.offerNextTrip(this.server, driverId);
+        if (this.driverState.canReceiveOffers(driverId)) {
+          this.offerManager.offerNextTrip(this.server, driverId);
+        }
         return { ok: false, message: 'Backend rejected status update' };
       }
 
+      this.driverState.setOnTrip(driverId, normalizedTripId, vehicleNo);
       client.join(this.connectionManager.tripRoom(normalizedTripId));
       this.tripParticipants.setDriver(normalizedTripId, driverId);
 
-      const acceptPayload = { tripId: normalizedTripId, driverId };
+      const acceptPayload = { tripId: normalizedTripId, driverId, ...(vehicleNo && { vehicleNo }) };
 
       this.tripEventEmitter.emitToTripRoom(
         this.server,
@@ -399,14 +432,18 @@ export class TripsGateway
       this.recentAcceptances.set(tripIdKey(normalizedTripId), acceptPayload);
       setTimeout(() => this.clearAcceptanceCache(normalizedTripId), 5 * 60 * 1000);
 
-      this.tripEventEmitter.emitGlobally(
+      this.tripEventEmitter.emitAcceptedByOtherDrivers(
         this.server,
-        EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER,
-        { driverId, tripId: normalizedTripId },
+        normalizedTripId,
+        driverId,
         'socket-accept',
       );
 
-      this.offerManager.clearAllOffersForTrip(this.server, normalizedTripId);
+      this.offerManager.clearAllOffersForTrip(
+        this.server,
+        normalizedTripId,
+        driverId,
+      );
 
       this.logger.log(
         `[accept] Trip ${normalizedTripId} acceptance complete | ${this.tripEventEmitter.getRoomDebugInfo(this.server, normalizedTripId)}`,
@@ -426,7 +463,12 @@ export class TripsGateway
   @SubscribeMessage(EVENTS.TRIP_STARTED)
   async handleTripStarted(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { tripId: number | string; driverId?: string | number },
+    @MessageBody()
+    payload: {
+      tripId: number | string;
+      driverId?: string | number;
+      vehicleNo?: string;
+    },
   ): Promise<SocketAck> {
     this.logger.log(
       `Received ${EVENTS.TRIP_STARTED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
@@ -442,12 +484,15 @@ export class TripsGateway
       return { ok: false, message: 'Invalid tripId' };
     }
 
+    const vehicleNo = this.cacheVehicleNo(driverId, payload.vehicleNo);
+
     return this.tripLifecycle.processDriverLifecycle(this.server, client, {
       event: EVENTS.TRIP_STARTED,
       status: TRIP_STATUS.STARTED,
       tripId,
       driverId,
-      broadcastPayload: { tripId, driverId },
+      vehicleNo,
+      broadcastPayload: { tripId, driverId, ...(vehicleNo && { vehicleNo }) },
       context: 'socket-started',
     });
   }
@@ -455,7 +500,14 @@ export class TripsGateway
   @SubscribeMessage(EVENTS.TRIP_COMPLETED)
   async handleTripCompleted(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { tripId: number | string; driverId?: string | number },
+    @MessageBody()
+    payload: {
+      tripId: number | string;
+      driverId?: string | number;
+      vehicleNo?: string;
+      driversFeedback?: string;
+      feedbackUsersRating?: number;
+    },
   ): Promise<SocketAck> {
     this.logger.log(
       `Received ${EVENTS.TRIP_COMPLETED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
@@ -471,6 +523,8 @@ export class TripsGateway
       return { ok: false, message: 'Invalid tripId' };
     }
 
+    const vehicleNo = this.cacheVehicleNo(driverId, payload.vehicleNo);
+
     const result = await this.tripLifecycle.processDriverLifecycle(
       this.server,
       client,
@@ -479,7 +533,20 @@ export class TripsGateway
         status: TRIP_STATUS.COMPLETED,
         tripId,
         driverId,
-        broadcastPayload: { tripId, driverId },
+        vehicleNo,
+        driversFeedback: payload.driversFeedback,
+        usersRating: payload.feedbackUsersRating,
+        broadcastPayload: {
+          tripId,
+          driverId,
+          ...(vehicleNo && { vehicleNo }),
+          ...(payload.driversFeedback !== undefined && {
+            driversFeedback: payload.driversFeedback,
+          }),
+          ...(payload.feedbackUsersRating !== undefined && {
+            feedbackUsersRating: payload.feedbackUsersRating,
+          }),
+        },
         context: 'socket-completed',
         terminal: true,
       },
@@ -499,6 +566,8 @@ export class TripsGateway
     payload: {
       tripId: number | string;
       driverId?: string | number;
+      vehicleNo?: string;
+      driversFeedback?: string;
       reason?: string;
     },
   ): Promise<SocketAck> {
@@ -516,6 +585,9 @@ export class TripsGateway
       return { ok: false, message: 'Invalid tripId' };
     }
 
+    const vehicleNo = this.cacheVehicleNo(driverId, payload.vehicleNo);
+    const driversFeedback = payload.driversFeedback ?? payload.reason;
+
     const result = await this.tripLifecycle.processDriverLifecycle(
       this.server,
       client,
@@ -524,11 +596,14 @@ export class TripsGateway
         status: TRIP_STATUS.CANCELLED_BY_DRIVER,
         tripId,
         driverId,
+        vehicleNo,
+        driversFeedback,
         reason: payload.reason,
         broadcastPayload: {
           tripId,
           driverId,
-          ...(payload.reason !== undefined && { reason: payload.reason }),
+          ...(driversFeedback !== undefined && { reason: driversFeedback }),
+          ...(vehicleNo && { vehicleNo }),
         },
         context: 'socket-cancelled-by-driver',
         terminal: true,
