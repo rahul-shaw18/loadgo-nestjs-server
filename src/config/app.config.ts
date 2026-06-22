@@ -16,6 +16,15 @@ export const DISCONNECT_GRACE_MS = 30 * 1000; // 30 seconds — grace before dri
 /** Trip API status codes considered "active" for socket room rejoin */
 export const ACTIVE_TRIP_STATUSES = [2, 4] as const;
 
+/** Trip lifecycle status codes sent to patchLiveTripData.php */
+export const TRIP_STATUS = {
+  ACCEPTED: 2,
+  STARTED: 4,
+  COMPLETED: 5,
+  CANCELLED_BY_USER: 6,
+  CANCELLED_BY_DRIVER: 7,
+} as const;
+
 export const BACKEND_ENDPOINTS = {
   PATCH_LIVE_TRIP:
     process.env.BACKEND_PATCH_LIVE_TRIP_PATH || 'patchLiveTripData.php',
