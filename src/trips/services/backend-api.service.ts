@@ -4,6 +4,7 @@ import {
   BACKEND_BASE_URL,
   BACKEND_ENDPOINTS,
   BACKEND_SERVICE_TOKEN,
+  TRIP_STATUS,
 } from '../../config/app.config';
 import { normalizeTripId, TripId } from '../utils/trip-id.util';
 
@@ -16,6 +17,22 @@ export interface DriverLocationPayload {
   speed?: number;
   timestamp: number;
 }
+
+export interface UpdateTripStatusParams {
+  tripId: TripId;
+  status: number;
+  driverId?: string | number;
+  userId?: string | number;
+  reason?: string;
+}
+
+const STATUS_LABELS: Record<number, string> = {
+  [TRIP_STATUS.ACCEPTED]: 'ACCEPTED',
+  [TRIP_STATUS.STARTED]: 'STARTED',
+  [TRIP_STATUS.COMPLETED]: 'COMPLETED',
+  [TRIP_STATUS.CANCELLED_BY_USER]: 'CANCELLED_BY_USER',
+  [TRIP_STATUS.CANCELLED_BY_DRIVER]: 'CANCELLED_BY_DRIVER',
+};
 
 interface LiveTripRecord {
   tripId?: unknown;
@@ -141,25 +158,29 @@ export class BackendApiService {
     return null;
   }
 
-  async confirmTripAcceptance(
-    tripId: TripId,
-    driverId: string | number,
-  ): Promise<boolean> {
+  async updateTripStatus(params: UpdateTripStatusParams): Promise<boolean> {
+    const { tripId, status, driverId, userId, reason } = params;
+    const statusLabel = STATUS_LABELS[status] ?? `STATUS_${status}`;
+
+    const body: Record<string, unknown> = {
+      id: tripId,
+      status,
+    };
+    if (driverId !== undefined) body.driverId = driverId;
+    if (userId !== undefined) body.userId = userId;
+    if (reason !== undefined) body.reason = reason;
+
     const result = await this.request<Record<string, unknown>>(
       BACKEND_ENDPOINTS.PATCH_LIVE_TRIP,
       {
         method: 'PATCH',
-        body: JSON.stringify({
-          id: tripId,
-          driverId,
-          status: 2,
-        }),
+        body: JSON.stringify(body),
       },
     );
 
     if (!result.ok) {
       this.logger.warn(
-        `[backend] confirmTripAcceptance failed for trip ${tripId} driver ${driverId} — HTTP ${result.status ?? 'error'}`,
+        `[backend] updateTripStatus(${statusLabel}) failed for trip ${tripId} — HTTP ${result.status ?? 'error'}`,
       );
       return false;
     }
@@ -167,15 +188,26 @@ export class BackendApiService {
     const success = result.data ? this.isSuccessResponse(result.data) : true;
     if (!success) {
       this.logger.warn(
-        `[backend] confirmTripAcceptance rejected for trip ${tripId} driver ${driverId} — response=${JSON.stringify(result.data)}`,
+        `[backend] updateTripStatus(${statusLabel}) rejected for trip ${tripId} — response=${JSON.stringify(result.data)}`,
       );
     } else {
       this.logger.log(
-        `[backend] confirmTripAcceptance succeeded for trip ${tripId} driver ${driverId}`,
+        `[backend] updateTripStatus(${statusLabel}) succeeded for trip ${tripId}`,
       );
     }
 
     return success;
+  }
+
+  async confirmTripAcceptance(
+    tripId: TripId,
+    driverId: string | number,
+  ): Promise<boolean> {
+    return this.updateTripStatus({
+      tripId,
+      status: TRIP_STATUS.ACCEPTED,
+      driverId,
+    });
   }
 
   persistDriverLocation(payload: DriverLocationPayload): void {

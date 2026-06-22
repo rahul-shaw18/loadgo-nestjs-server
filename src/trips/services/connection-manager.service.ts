@@ -39,6 +39,26 @@ export class ConnectionManagerService {
     return Object.keys(this.onlineDrivers);
   }
 
+  findDriverIdBySocket(socketId: string): string | null {
+    return (
+      Object.keys(this.onlineDrivers).find(
+        (id) => this.onlineDrivers[id] === socketId,
+      ) ?? null
+    );
+  }
+
+  getAllUserIds(): string[] {
+    return Object.keys(this.onlineUsers);
+  }
+
+  findUserIdBySocket(socketId: string): string | null {
+    return (
+      Object.keys(this.onlineUsers).find(
+        (id) => this.onlineUsers[id] === socketId,
+      ) ?? null
+    );
+  }
+
   // ─── User methods ───
   addUser(userId: string | number, socketId: string) {
     this.onlineUsers[String(userId)] = socketId;
@@ -93,5 +113,11 @@ export class ConnectionManagerService {
       socket.join(room);
       this.logger.log(`User ${userId} joined room ${room} (socket: ${socketId})`);
     }
+  }
+
+  leaveTripRoom(io: Server, tripId: string | number): void {
+    const room = this.tripRoom(tripId);
+    io.in(room).socketsLeave(room);
+    this.logger.log(`All sockets left room ${room}`);
   }
 }

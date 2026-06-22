@@ -9,6 +9,7 @@ import { LocationCacheService } from './services/location-cache.service';
 import { DisconnectGraceService } from './services/disconnect-grace.service';
 import { TripParticipantsService } from './services/trip-participants.service';
 import { TripEventEmitterService } from './services/trip-event-emitter.service';
+import { TripLifecycleService } from './services/trip-lifecycle.service';
 
 @Module({
   controllers: [TripsController],
@@ -22,6 +23,7 @@ import { TripEventEmitterService } from './services/trip-event-emitter.service';
     DisconnectGraceService,
     TripParticipantsService,
     TripEventEmitterService,
+    TripLifecycleService,
   ],
 })
 export class TripsModule {}
