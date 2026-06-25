@@ -5,6 +5,7 @@ import { EVENTS } from '../../config/events.constant';
 import { DriverQueueService } from './driver-queue.service';
 import { ConnectionManagerService } from './connection-manager.service';
 import { DriverStateService } from './driver-state.service';
+import { TripRejectionCooldownService } from './trip-rejection-cooldown.service';
 import { TripId, tripIdsEqual } from '../utils/trip-id.util';
 
 interface ActiveOffer {
@@ -22,7 +23,33 @@ export class OfferManagerService {
     private readonly driverQueue: DriverQueueService,
     private readonly connectionManager: ConnectionManagerService,
     private readonly driverState: DriverStateService,
+    private readonly rejectionCooldown: TripRejectionCooldownService,
   ) {}
+
+  private getNextEligibleTrip(driverId: string) {
+    const id = String(driverId);
+    let attempts = 0;
+    const maxAttempts = this.driverQueue.getQueueSize(id) + 1;
+
+    while (attempts < maxAttempts) {
+      attempts += 1;
+      const nextTrip = this.driverQueue.getNextTrip(id);
+      if (!nextTrip) {
+        return null;
+      }
+
+      if (!this.rejectionCooldown.isHidden(id, nextTrip.tripId)) {
+        return nextTrip;
+      }
+
+      this.logger.debug(
+        `Skipping trip ${nextTrip.tripId} for driver ${id} — rejection cooldown active`,
+      );
+      this.driverQueue.rotateCurrentTrip(id);
+    }
+
+    return null;
+  }
 
   offerNextTrip(io: Server, driverId: string | number) {
     const id = String(driverId);
@@ -39,7 +66,7 @@ export class OfferManagerService {
       return;
     }
 
-    const nextTrip = this.driverQueue.getNextTrip(id);
+    const nextTrip = this.getNextEligibleTrip(id);
     if (!nextTrip) {
       this.logger.debug(`No trips in queue for driver ${id}`);
       return;
@@ -230,6 +257,13 @@ export class OfferManagerService {
     this.driverState.setOffline(driverId);
     this.logger.log(
       `Driver ${driverId} disconnected — offer cleared, queue preserved`,
+    );
+  }
+
+  onDriverDisconnectDuringActiveTrip(driverId: string | number) {
+    this.clearOffer(driverId);
+    this.logger.log(
+      `Driver ${driverId} disconnected during active trip — on_trip state preserved`,
     );
   }
 }

@@ -18,8 +18,10 @@ import { LocationCacheService } from '../services/location-cache.service';
 import { DisconnectGraceService } from '../services/disconnect-grace.service';
 import { TripParticipantsService } from '../services/trip-participants.service';
 import { TripEventEmitterService } from '../services/trip-event-emitter.service';
-import { TripLifecycleService, SocketAck } from '../services/trip-lifecycle.service';
+import { TripLifecycleService } from '../services/trip-lifecycle.service';
+import type { SocketAck } from '../services/trip-lifecycle.service';
 import { DriverStateService } from '../services/driver-state.service';
+import { TripRejectionCooldownService } from '../services/trip-rejection-cooldown.service';
 import { EVENTS } from '../../config/events.constant';
 import { LOCATION_UPDATE_THROTTLE_MS, TRIP_STATUS } from '../../config/app.config';
 import { normalizeTripId, TripId, tripIdKey, tripIdsEqual } from '../utils/trip-id.util';
@@ -43,6 +45,9 @@ export class TripsGateway
   // Throttle high-frequency GPS updates per driver
   private lastLocationUpdateAt = new Map<string, number>();
 
+  // Drivers who disconnected mid-trip — emit DRIVER_RECONNECTED on next register
+  private driversDisconnectedOnTrip = new Set<string>();
+
   constructor(
     private readonly connectionManager: ConnectionManagerService,
     private readonly driverQueue: DriverQueueService,
@@ -54,10 +59,14 @@ export class TripsGateway
     private readonly tripEventEmitter: TripEventEmitterService,
     private readonly tripLifecycle: TripLifecycleService,
     private readonly driverState: DriverStateService,
+    private readonly rejectionCooldown: TripRejectionCooldownService,
   ) {}
 
   afterInit(server: Server) {
     this.logger.log('WebSocket Gateway initialized');
+    this.rejectionCooldown.setExpireHandler((driverId, tripId) =>
+      this.handleRejectionCooldownExpired(driverId, tripId),
+    );
   }
 
   handleConnection(client: Socket, ...args: any[]) {
@@ -69,13 +78,29 @@ export class TripsGateway
     const userId = this.connectionManager.removeUserBySocketId(client.id);
 
     if (driverId) {
-      this.logger.log(
-        `[disconnect] Driver ${driverId} disconnected (socket ${client.id}) — scheduling grace cleanup`,
-      );
-      this.offerManager.onDriverDisconnect(driverId);
-      this.disconnectGrace.scheduleDriverCleanup(driverId, () => {
-        this.offerManager.cleanupDriver(driverId);
-      });
+      const activeTripId = this.driverState.getActiveTripId(driverId);
+      const onActiveTrip = this.driverState.isOnTrip(driverId) && activeTripId;
+
+      if (onActiveTrip) {
+        this.logger.log(
+          `[disconnect] Driver ${driverId} disconnected during active trip ${activeTripId} (socket ${client.id})`,
+        );
+        this.offerManager.onDriverDisconnectDuringActiveTrip(driverId);
+        this.driversDisconnectedOnTrip.add(String(driverId));
+        this.emitDriverConnectionEvent(
+          EVENTS.DRIVER_DISCONNECTED,
+          activeTripId,
+          driverId,
+        );
+      } else {
+        this.logger.log(
+          `[disconnect] Driver ${driverId} disconnected (socket ${client.id}) — scheduling grace cleanup`,
+        );
+        this.offerManager.onDriverDisconnect(driverId);
+        this.disconnectGrace.scheduleDriverCleanup(driverId, () => {
+          this.offerManager.cleanupDriver(driverId);
+        });
+      }
     }
 
     if (userId) {
@@ -86,15 +111,112 @@ export class TripsGateway
   }
 
   private async resolveActiveTripId(
-    providedTripId: string | number | undefined,
+    providedTripId: string | number | null | undefined,
     fetchActiveTrip: () => Promise<TripId | null>,
+    options?: { skipRestore?: boolean },
   ): Promise<TripId | null> {
+    if (options?.skipRestore) {
+      this.logger.log(
+        '[rejoin] skipTripRestore=true — not calling getLiveTripData.php',
+      );
+      return normalizeTripId(providedTripId);
+    }
+
     const normalizedProvided = normalizeTripId(providedTripId);
     if (normalizedProvided) {
       return normalizedProvided;
     }
 
     return fetchActiveTrip();
+  }
+
+  private clearDriverTripAssociation(
+    driverId: string | number,
+    previousTripId?: TripId | null,
+  ): void {
+    const tripToLeave =
+      previousTripId ?? this.driverState.getActiveTripId(driverId);
+
+    if (tripToLeave) {
+      this.connectionManager.leaveDriverFromTripRoom(
+        this.server,
+        driverId,
+        tripToLeave,
+      );
+    }
+
+    this.tripParticipants.clearDriver(driverId);
+    this.driverState.setOnline(driverId);
+  }
+
+  private clearUserTripAssociation(
+    userId: string | number,
+    tripId?: TripId | null,
+  ): void {
+    if (tripId) {
+      this.connectionManager.leaveUserFromTripRoom(this.server, userId, tripId);
+    }
+
+    this.tripParticipants.clearUser(userId);
+  }
+
+  private emitDriverConnectionEvent(
+    event:
+      | typeof EVENTS.DRIVER_DISCONNECTED
+      | typeof EVENTS.DRIVER_RECONNECTED,
+    tripId: TripId,
+    driverId: string | number,
+  ): void {
+    const payload = { tripId, driverId };
+
+    this.tripEventEmitter.emitToTripRoom(
+      this.server,
+      tripId,
+      event,
+      payload,
+      `driver-connection:${event}`,
+      { driverId },
+    );
+
+    const participants = this.tripParticipants.get(tripId);
+    if (participants?.userId) {
+      this.tripEventEmitter.emitDirectToUser(
+        this.server,
+        participants.userId,
+        event,
+        payload,
+        `driver-connection:${event}:fallback`,
+      );
+    }
+  }
+
+  private async handleRejectionCooldownExpired(
+    driverId: string,
+    tripId: TripId,
+  ): Promise<void> {
+    const status = await this.backendApi.fetchTripStatus(tripId);
+
+    if (status !== TRIP_STATUS.REQUESTED) {
+      this.logger.log(
+        `[rejection-cooldown] Trip ${tripIdKey(tripId)} status is ${status ?? 'unknown'} — not re-adding for driver ${driverId}`,
+      );
+      return;
+    }
+
+    if (!this.driverState.canReceiveOffers(driverId)) {
+      this.logger.log(
+        `[rejection-cooldown] Driver ${driverId} cannot receive offers — skipping re-add for trip ${tripIdKey(tripId)}`,
+      );
+      return;
+    }
+
+    const added = this.driverQueue.addTripToDriver(driverId, tripId);
+    if (added && !this.offerManager.hasOffer(driverId)) {
+      this.offerManager.offerNextTrip(this.server, driverId);
+      this.logger.log(
+        `[rejection-cooldown] Trip ${tripIdKey(tripId)} re-queued for driver ${driverId} (status 1)`,
+      );
+    }
   }
 
   private syncUserTripState(
@@ -277,14 +399,20 @@ export class TripsGateway
   async handleRegisterDriver(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    payload: { driverId: string | number; tripId?: string | number | null },
+    payload: {
+      driverId: string | number;
+      tripId?: string | number | null;
+      skipTripRestore?: boolean;
+    },
   ) {
     this.logger.log(`Received ${EVENTS.REGISTER_DRIVER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
-    const { driverId, tripId } = payload;
+    const { driverId, tripId, skipTripRestore } = payload;
     if (!driverId) {
       this.logger.warn('REGISTER_DRIVER called without driverId');
       return;
     }
+
+    const previousTripId = this.driverState.getActiveTripId(driverId);
 
     this.connectionManager.addDriver(driverId, client.id);
     this.connectionManager.joinDriverPersonalRoom(this.server, driverId, client);
@@ -293,6 +421,7 @@ export class TripsGateway
     const activeTripId = await this.resolveActiveTripId(
       tripId ?? undefined,
       () => this.backendApi.fetchDriverActiveTrip(driverId),
+      { skipRestore: skipTripRestore === true },
     );
 
     if (activeTripId) {
@@ -302,8 +431,17 @@ export class TripsGateway
       this.logger.log(
         `[rejoin] Driver ${driverId} joined active trip ${activeTripId} | ${this.tripEventEmitter.getRoomDebugInfo(this.server, activeTripId)}`,
       );
+
+      if (this.driversDisconnectedOnTrip.has(String(driverId))) {
+        this.driversDisconnectedOnTrip.delete(String(driverId));
+        this.emitDriverConnectionEvent(
+          EVENTS.DRIVER_RECONNECTED,
+          activeTripId,
+          driverId,
+        );
+      }
     } else {
-      this.driverState.setOnline(driverId);
+      this.clearDriverTripAssociation(driverId, previousTripId);
       this.logger.log(`[rejoin] Driver ${driverId} registered (no active trip)`);
     }
 
@@ -320,10 +458,14 @@ export class TripsGateway
   async handleRegisterUser(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    payload: { userId: string | number; tripId?: string | number },
+    payload: {
+      userId: string | number;
+      tripId?: string | number | null;
+      skipTripRestore?: boolean;
+    },
   ) {
     this.logger.log(`Received ${EVENTS.REGISTER_USER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
-    const { userId, tripId } = payload;
+    const { userId, tripId, skipTripRestore } = payload;
     if (!userId) {
       this.logger.warn('REGISTER_USER called without userId');
       return;
@@ -331,8 +473,10 @@ export class TripsGateway
 
     this.connectionManager.addUser(userId, client.id);
 
-    const activeTripId = await this.resolveActiveTripId(tripId, () =>
-      this.backendApi.fetchUserActiveTrip(userId),
+    const activeTripId = await this.resolveActiveTripId(
+      tripId ?? undefined,
+      () => this.backendApi.fetchUserActiveTrip(userId),
+      { skipRestore: skipTripRestore === true },
     );
 
     if (activeTripId) {
@@ -343,6 +487,7 @@ export class TripsGateway
       this.tripParticipants.setUser(activeTripId, userId);
       this.syncUserTripState(client, userId, activeTripId);
     } else {
+      this.clearUserTripAssociation(userId, normalizeTripId(tripId));
       this.logger.log(`[rejoin] User ${userId} registered (no active trip)`);
     }
   }
@@ -621,30 +766,44 @@ export class TripsGateway
   @SubscribeMessage(EVENTS.TRIP_REJECTED)
   handleRejectOffer(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { tripId: number | string },
-  ) {
-    this.logger.log(`Received ${EVENTS.TRIP_REJECTED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
+    @MessageBody()
+    payload: {
+      tripId: number | string;
+      driverId?: string | number;
+      reason?: string;
+    },
+  ): SocketAck {
+    this.logger.log(
+      `Received ${EVENTS.TRIP_REJECTED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
+    );
     const normalizedTripId = normalizeTripId(payload?.tripId);
-    const driverId = this.resolveDriverId(client);
+    const driverId = this.resolveDriverId(client, payload?.driverId);
+
     if (!driverId) {
       this.logger.warn('TRIP_REJECTED from unknown socket');
-      return;
+      return { ok: false, message: 'Driver not registered' };
     }
 
     if (!normalizedTripId) {
       this.logger.warn('TRIP_REJECTED called with invalid tripId');
-      return;
+      return { ok: false, message: 'Invalid tripId' };
     }
+
+    this.rejectionCooldown.recordRejection(
+      driverId,
+      normalizedTripId,
+      payload.reason,
+    );
+    this.driverQueue.removeTripFromDriver(driverId, normalizedTripId);
 
     const offer = this.offerManager.getOffer(driverId);
-    if (!offer || !tripIdsEqual(offer.tripId, normalizedTripId)) {
-      this.logger.warn(
-        `Driver ${driverId} rejected trip ${normalizedTripId} but current offer is ${offer ? offer.tripId : 'none'}`,
-      );
-      return;
+    if (offer && tripIdsEqual(offer.tripId, normalizedTripId)) {
+      this.offerManager.handleReject(this.server, driverId);
+    } else if (this.driverState.canReceiveOffers(driverId)) {
+      this.offerManager.offerNextTrip(this.server, driverId);
     }
 
-    this.offerManager.handleReject(this.server, driverId);
+    return { ok: true };
   }
 
   @SubscribeMessage(EVENTS.TRIP_CANCELLED_BY_USER)

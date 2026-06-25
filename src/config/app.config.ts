@@ -12,12 +12,14 @@ export const BACKGROUND_TIMER_MS = 5 * 60 * 1000; // 5 minutes — total lifetim
 export const ROTATION_GAP_MS = 3 * 1000; // 3 seconds — gap between trip rotations
 export const LOCATION_UPDATE_THROTTLE_MS = 1000; // 1 second — max location broadcasts per driver
 export const DISCONNECT_GRACE_MS = 30 * 1000; // 30 seconds — grace before driver queue cleanup
+export const REJECTION_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes — hide rejected trip from driver
 
 /** Trip API status codes considered "active" for socket room rejoin */
 export const ACTIVE_TRIP_STATUSES = [2, 4] as const;
 
 /** Trip lifecycle status codes sent to patchLiveTripData.php */
 export const TRIP_STATUS = {
+  REQUESTED: 1,
   ACCEPTED: 2,
   STARTED: 4,
   COMPLETED: 5,

@@ -11,6 +11,7 @@ import { TripParticipantsService } from './services/trip-participants.service';
 import { TripEventEmitterService } from './services/trip-event-emitter.service';
 import { TripLifecycleService } from './services/trip-lifecycle.service';
 import { DriverStateService } from './services/driver-state.service';
+import { TripRejectionCooldownService } from './services/trip-rejection-cooldown.service';
 
 @Module({
   controllers: [TripsController],
@@ -26,6 +27,7 @@ import { DriverStateService } from './services/driver-state.service';
     TripEventEmitterService,
     TripLifecycleService,
     DriverStateService,
+    TripRejectionCooldownService,
   ],
 })
 export class TripsModule {}
