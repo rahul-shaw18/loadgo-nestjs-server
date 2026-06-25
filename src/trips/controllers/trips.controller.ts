@@ -14,6 +14,7 @@ import { LocationCacheService } from '../services/location-cache.service';
 import { TripParticipantsService } from '../services/trip-participants.service';
 import { TripEventEmitterService } from '../services/trip-event-emitter.service';
 import { DriverStateService } from '../services/driver-state.service';
+import { TripRejectionCooldownService } from '../services/trip-rejection-cooldown.service';
 import { NotifyNewTripDto, TripStatusUpdateDto } from '../dto/trip.dto';
 import { TripId } from '../utils/trip-id.util';
 import { EVENTS } from '../../config/events.constant';
@@ -54,12 +55,14 @@ export class TripsController {
     private readonly tripParticipants: TripParticipantsService,
     private readonly tripEventEmitter: TripEventEmitterService,
     private readonly driverState: DriverStateService,
+    private readonly rejectionCooldown: TripRejectionCooldownService,
     private readonly tripsGateway: TripsGateway,
   ) {}
 
   private clearTripTrackingState(tripId: TripId) {
     this.locationCache.clear(tripId);
     this.tripParticipants.clear(tripId);
+    this.rejectionCooldown.clearAllForTrip(tripId);
     this.logger.log(`Cleared tracking state for trip ${tripId}`);
   }
 
@@ -113,6 +116,13 @@ export class TripsController {
       if (!this.driverState.canReceiveOffers(driverId)) {
         this.logger.log(
           `[notify-new-trip] Skipping driver ${driverId} — on active trip`,
+        );
+        return;
+      }
+
+      if (this.rejectionCooldown.isHidden(driverId, tripId)) {
+        this.logger.log(
+          `[notify-new-trip] Skipping driver ${driverId} — trip ${tripId} in rejection cooldown`,
         );
         return;
       }
@@ -184,6 +194,7 @@ export class TripsController {
           if (driverId) {
             this.driverState.setOnTrip(driverId, tripId);
           }
+          this.rejectionCooldown.clearAllForTrip(tripId);
           const acceptPayload = { tripId, driverId };
           this.tripEventEmitter.emitToTripRoom(
             io,

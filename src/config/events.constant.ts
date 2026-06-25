@@ -27,4 +27,8 @@ export const EVENTS = {
 
   // ─── Live driver tracking (trip room broadcast) ─────────────────────────────
   DRIVER_LOCATION_UPDATE: 'DRIVER_LOCATION_UPDATE',
+
+  // ─── Driver connection state (active trip only) ───────────────────────────
+  DRIVER_DISCONNECTED: 'DRIVER_DISCONNECTED',
+  DRIVER_RECONNECTED: 'DRIVER_RECONNECTED',
 };

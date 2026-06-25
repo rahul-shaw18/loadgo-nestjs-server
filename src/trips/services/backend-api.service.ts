@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
-  ACTIVE_TRIP_STATUSES,
   BACKEND_BASE_URL,
   BACKEND_ENDPOINTS,
   BACKEND_SERVICE_TOKEN,
   TRIP_STATUS,
 } from '../../config/app.config';
 import { normalizeTripId, TripId } from '../utils/trip-id.util';
+import {
+  extractActiveTripId as parseActiveTripId,
+  extractTripStatus,
+  parseTripStatus,
+} from '../utils/trip-record.util';
 
 export interface DriverLocationPayload {
   tripId: TripId;
@@ -42,6 +46,9 @@ interface LiveTripRecord {
   trip_id?: unknown;
   id?: unknown;
   status?: unknown;
+  trip_status?: unknown;
+  driverId?: unknown;
+  userId?: unknown;
 }
 
 @Injectable()
@@ -112,53 +119,12 @@ export class BackendApiService {
     if (typeof record.message === 'string') {
       const message = record.message.toLowerCase();
       return (
-        message.includes('successfully') || message.includes('updated successfully')
+        message.includes('successfully') ||
+        message.includes('updated successfully')
       );
     }
 
     return false;
-  }
-
-  private extractTripIdFromRecord(record: LiveTripRecord | null): TripId | null {
-    if (!record) {
-      return null;
-    }
-
-    return (
-      normalizeTripId(record.tripId) ??
-      normalizeTripId(record.trip_id) ??
-      normalizeTripId(record.id)
-    );
-  }
-
-  private extractActiveTripId(data: unknown): TripId | null {
-    if (!data || typeof data !== 'object') {
-      return null;
-    }
-
-    const record = data as Record<string, unknown>;
-    const trips = Array.isArray(record.data) ? record.data : [record.data ?? record];
-
-    for (const trip of trips) {
-      if (!trip || typeof trip !== 'object') {
-        continue;
-      }
-
-      const tripRecord = trip as LiveTripRecord;
-      const status = Number(tripRecord.status);
-      const tripId = this.extractTripIdFromRecord(tripRecord);
-
-      if (
-        tripId &&
-        ACTIVE_TRIP_STATUSES.includes(
-          status as (typeof ACTIVE_TRIP_STATUSES)[number],
-        )
-      ) {
-        return tripId;
-      }
-    }
-
-    return null;
   }
 
   async updateTripStatus(params: UpdateTripStatusParams): Promise<boolean> {
@@ -256,13 +222,35 @@ export class BackendApiService {
     );
 
     if (!result.ok || !result.data) {
+      this.logger.debug(
+        `[backend] getLiveTripData (${param}) — no response or HTTP error`,
+      );
       return null;
     }
 
-    const activeTripId = this.extractActiveTripId(result.data);
-    if (!activeTripId) {
-      this.logger.debug(
-        `No active trip (status 2 or 4) found for ${param}`,
+    const activeTripId = parseActiveTripId(result.data, query);
+    if (activeTripId) {
+      const trips = Array.isArray(
+        (result.data as Record<string, unknown>).data,
+      )
+        ? (result.data as Record<string, unknown>).data
+        : [result.data];
+      const matched = (trips as LiveTripRecord[]).find((trip) => {
+        const tripId =
+          normalizeTripId(trip?.tripId) ??
+          normalizeTripId(trip?.trip_id) ??
+          normalizeTripId(trip?.id);
+        return tripId !== null && String(tripId) === String(activeTripId);
+      });
+      const status = matched
+        ? parseTripStatus(matched as Record<string, unknown>)
+        : null;
+      this.logger.log(
+        `[backend] getLiveTripData (${param}) → active trip ${activeTripId} (status ${status ?? 'unknown'})`,
+      );
+    } else {
+      this.logger.log(
+        `[backend] getLiveTripData (${param}) → no active trip (status 2 or 4)`,
       );
     }
 
@@ -277,5 +265,27 @@ export class BackendApiService {
 
   async fetchUserActiveTrip(userId: string | number): Promise<TripId | null> {
     return this.fetchActiveTrip({ userId });
+  }
+
+  async fetchTripStatus(tripId: TripId): Promise<number | null> {
+    const param = `id=${encodeURIComponent(String(tripId))}`;
+
+    const result = await this.request<Record<string, unknown>>(
+      `${BACKEND_ENDPOINTS.GET_LIVE_TRIP}?${param}`,
+      { method: 'GET' },
+    );
+
+    if (!result.ok || !result.data) {
+      this.logger.debug(
+        `[backend] getLiveTripData (${param}) — no response for status check`,
+      );
+      return null;
+    }
+
+    const status = extractTripStatus(result.data, tripId);
+    this.logger.log(
+      `[backend] getLiveTripData (${param}) → status ${status ?? 'unknown'}`,
+    );
+    return status;
   }
 }

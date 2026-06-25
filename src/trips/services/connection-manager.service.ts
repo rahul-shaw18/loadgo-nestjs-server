@@ -141,4 +141,46 @@ export class ConnectionManagerService {
     io.in(room).socketsLeave(room);
     this.logger.log(`All sockets left room ${room}`);
   }
+
+  leaveDriverFromTripRoom(
+    io: Server,
+    driverId: string | number,
+    tripId: string | number,
+  ): void {
+    const socketId = this.onlineDrivers[String(driverId)];
+    if (!socketId) {
+      return;
+    }
+
+    const socket = io.sockets.sockets.get(socketId);
+    if (!socket) {
+      return;
+    }
+
+    const room = this.tripRoom(tripId);
+    socket.leave(room);
+    this.logger.log(
+      `Driver ${driverId} left room ${room} (socket: ${socketId})`,
+    );
+  }
+
+  leaveUserFromTripRoom(
+    io: Server,
+    userId: string | number,
+    tripId: string | number,
+  ): void {
+    const socketId = this.onlineUsers[String(userId)];
+    if (!socketId) {
+      return;
+    }
+
+    const socket = io.sockets.sockets.get(socketId);
+    if (!socket) {
+      return;
+    }
+
+    const room = this.tripRoom(tripId);
+    socket.leave(room);
+    this.logger.log(`User ${userId} left room ${room} (socket: ${socketId})`);
+  }
 }
