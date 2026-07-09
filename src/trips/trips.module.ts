@@ -12,6 +12,10 @@ import { TripEventEmitterService } from './services/trip-event-emitter.service';
 import { TripLifecycleService } from './services/trip-lifecycle.service';
 import { DriverStateService } from './services/driver-state.service';
 import { TripRejectionCooldownService } from './services/trip-rejection-cooldown.service';
+import { SocketRegistrationService } from './services/socket-registration.service';
+import { DriverDisconnectTrackerService } from './services/driver-disconnect-tracker.service';
+import { PendingTerminalService } from './services/pending-terminal.service';
+import { TripLifecycleLockService } from './services/trip-lifecycle-lock.service';
 
 @Module({
   controllers: [TripsController],
@@ -28,6 +32,10 @@ import { TripRejectionCooldownService } from './services/trip-rejection-cooldown
     TripLifecycleService,
     DriverStateService,
     TripRejectionCooldownService,
+    SocketRegistrationService,
+    DriverDisconnectTrackerService,
+    PendingTerminalService,
+    TripLifecycleLockService,
   ],
 })
 export class TripsModule {}

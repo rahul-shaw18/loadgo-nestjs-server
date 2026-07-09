@@ -1,4 +1,4 @@
-import { IsArray, IsNumber, IsNotEmpty, IsOptional } from 'class-validator';
+import { IsArray, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class NotifyNewTripDto {
@@ -97,4 +97,72 @@ export class DriverLocationDto {
   @IsOptional()
   @IsNumber()
   timestamp?: number;
+}
+
+export class TripStartedSocketDto {
+  @ApiProperty({ description: 'Trip ID', example: 725 })
+  @IsNotEmpty()
+  tripId: number | string;
+
+  @ApiPropertyOptional({ description: 'Driver ID (resolved from socket if omitted)' })
+  @IsOptional()
+  driverId?: string | number;
+
+  @ApiPropertyOptional({ description: 'Vehicle number' })
+  @IsOptional()
+  @IsString()
+  vehicleNo?: string;
+
+  @ApiProperty({
+    description: 'Driver latitude at trip start',
+    example: '22.56730330',
+  })
+  @IsNotEmpty()
+  lat: number | string;
+
+  @ApiProperty({
+    description: 'Driver longitude at trip start',
+    example: '88.38463000',
+  })
+  @IsNotEmpty()
+  lng: number | string;
+}
+
+export class TripCompletedSocketDto {
+  @ApiProperty({ description: 'Trip ID', example: 725 })
+  @IsNotEmpty()
+  tripId: number | string;
+
+  @ApiPropertyOptional({ description: 'Driver ID (resolved from socket if omitted)' })
+  @IsOptional()
+  driverId?: string | number;
+
+  @ApiPropertyOptional({ description: 'Vehicle number' })
+  @IsOptional()
+  @IsString()
+  vehicleNo?: string;
+
+  @ApiPropertyOptional({ description: 'Driver feedback on trip completion' })
+  @IsOptional()
+  @IsString()
+  driversFeedback?: string;
+
+  @ApiPropertyOptional({ description: 'User rating provided by driver', example: 5 })
+  @IsOptional()
+  @IsNumber()
+  feedbackUsersRating?: number;
+
+  @ApiProperty({
+    description: 'Driver latitude at trip completion',
+    example: '22.56730330',
+  })
+  @IsNotEmpty()
+  lat: number | string;
+
+  @ApiProperty({
+    description: 'Driver longitude at trip completion',
+    example: '88.38463000',
+  })
+  @IsNotEmpty()
+  lng: number | string;
 }

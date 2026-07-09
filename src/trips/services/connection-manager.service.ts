@@ -1,15 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
+import { joinRoomIfNeeded } from '../utils/room.util';
 
 @Injectable()
 export class ConnectionManagerService {
   private readonly logger = new Logger(ConnectionManagerService.name);
 
-  // state
   private onlineDrivers: Record<string, string> = {};
   private onlineUsers: Record<string, string> = {};
 
-  // Room helper
   tripRoom(tripId: number | string): string {
     return `trip_${tripId}`;
   }
@@ -18,10 +17,15 @@ export class ConnectionManagerService {
     return `driver_${driverId}`;
   }
 
-  // ─── Driver methods ───
-  addDriver(driverId: string | number, socketId: string) {
-    this.onlineDrivers[String(driverId)] = socketId;
+  addDriver(driverId: string | number, socketId: string): boolean {
+    const id = String(driverId);
+    if (this.onlineDrivers[id] === socketId) {
+      return false;
+    }
+
+    this.onlineDrivers[id] = socketId;
     this.logger.log(`Driver ${driverId} connected (socket: ${socketId})`);
+    return true;
   }
 
   removeDriverBySocketId(socketId: string): string | null {
@@ -63,10 +67,15 @@ export class ConnectionManagerService {
     );
   }
 
-  // ─── User methods ───
-  addUser(userId: string | number, socketId: string) {
-    this.onlineUsers[String(userId)] = socketId;
+  addUser(userId: string | number, socketId: string): boolean {
+    const id = String(userId);
+    if (this.onlineUsers[id] === socketId) {
+      return false;
+    }
+
+    this.onlineUsers[id] = socketId;
     this.logger.log(`User ${userId} connected (socket: ${socketId})`);
+    return true;
   }
 
   removeUserBySocketId(socketId: string): string | null {
@@ -84,7 +93,6 @@ export class ConnectionManagerService {
     return this.onlineUsers[String(userId)] || null;
   }
 
-  // ─── Room operations ───
   joinDriverPersonalRoom(
     io: Server,
     driverId: string | number,
@@ -94,15 +102,18 @@ export class ConnectionManagerService {
     const targetSocket =
       socket ?? io.sockets.sockets.get(this.onlineDrivers[String(driverId)]);
 
-    if (targetSocket) {
-      targetSocket.join(room);
+    if (targetSocket && joinRoomIfNeeded(targetSocket, room)) {
       this.logger.log(
         `Driver ${driverId} joined personal room ${room} (socket: ${targetSocket.id})`,
       );
     }
   }
 
-  joinDriverToTripRoom(io: Server, driverId: string | number, tripId: string | number) {
+  joinDriverToTripRoom(
+    io: Server,
+    driverId: string | number,
+    tripId: string | number,
+  ): void {
     const socketId = this.onlineDrivers[String(driverId)];
     if (!socketId) {
       this.logger.warn(
@@ -112,14 +123,23 @@ export class ConnectionManagerService {
     }
 
     const socket = io.sockets.sockets.get(socketId);
-    if (socket) {
-      const room = this.tripRoom(tripId);
-      socket.join(room);
-      this.logger.log(`Driver ${driverId} joined room ${room} (socket: ${socketId})`);
+    if (!socket) {
+      return;
+    }
+
+    const room = this.tripRoom(tripId);
+    if (joinRoomIfNeeded(socket, room)) {
+      this.logger.log(
+        `Driver ${driverId} joined room ${room} (socket: ${socketId})`,
+      );
     }
   }
 
-  joinUserToTripRoom(io: Server, userId: string | number, tripId: string | number) {
+  joinUserToTripRoom(
+    io: Server,
+    userId: string | number,
+    tripId: string | number,
+  ): void {
     const socketId = this.onlineUsers[String(userId)];
     if (!socketId) {
       this.logger.warn(
@@ -129,10 +149,22 @@ export class ConnectionManagerService {
     }
 
     const socket = io.sockets.sockets.get(socketId);
-    if (socket) {
-      const room = this.tripRoom(tripId);
-      socket.join(room);
+    if (!socket) {
+      return;
+    }
+
+    const room = this.tripRoom(tripId);
+    if (joinRoomIfNeeded(socket, room)) {
       this.logger.log(`User ${userId} joined room ${room} (socket: ${socketId})`);
+    }
+  }
+
+  joinSocketToTripRoom(socket: Socket, tripId: string | number): void {
+    const room = this.tripRoom(tripId);
+    if (joinRoomIfNeeded(socket, room)) {
+      this.logger.log(
+        `Socket ${socket.id} joined room ${room}`,
+      );
     }
   }
 
