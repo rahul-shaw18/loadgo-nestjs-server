@@ -229,11 +229,13 @@ export class OfferManagerService {
   ): { valid: boolean; tripId: TripId | null } {
     const id = String(driverId);
     const offer = this.activeOffers[id];
+    const activeOfferValid =
+      !!offer && tripIdsEqual(offer.tripId, tripId);
+    const inQueue = this.driverQueue.hasTripInQueue(id, tripId);
 
-    if (!offer || !tripIdsEqual(offer.tripId, tripId)) {
+    if (!activeOfferValid && !inQueue) {
       this.logger.warn(
-        `Driver ${id} tried to accept trip ${tripId} ` +
-          `but current offer is ${offer ? offer.tripId : 'none'}`,
+        `Driver ${id} tried to accept trip ${tripId} — not in active offer or queue`,
       );
       return { valid: false, tripId: null };
     }
@@ -244,8 +246,26 @@ export class OfferManagerService {
     return { valid: true, tripId };
   }
 
+  restoreQueuedOfferOnRegister(io: Server, driverId: string | number): void {
+    const id = String(driverId);
+    if (!this.driverState.canReceiveOffers(id)) {
+      return;
+    }
+
+    if (this.driverQueue.getQueueSize(id) > 0) {
+      this.offerNextTrip(io, id);
+    }
+  }
+
   cleanupDriver(driverId: string | number) {
     const id = String(driverId);
+    if (!this.driverState.isReconnecting(id)) {
+      this.logger.debug(
+        `Skipping grace cleanup for driver ${id} — no longer reconnecting`,
+      );
+      return;
+    }
+
     this.clearOffer(id);
     this.driverQueue.clearDriver(id);
     this.driverState.setOffline(id);
@@ -254,9 +274,9 @@ export class OfferManagerService {
 
   onDriverDisconnect(driverId: string | number) {
     this.clearOffer(driverId);
-    this.driverState.setOffline(driverId);
+    this.driverState.setReconnecting(driverId);
     this.logger.log(
-      `Driver ${driverId} disconnected — offer cleared, queue preserved`,
+      `Driver ${driverId} disconnected — offer cleared, state reconnecting`,
     );
   }
 

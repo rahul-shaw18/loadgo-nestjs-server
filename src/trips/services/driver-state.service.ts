@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { TripId, tripIdKey, tripIdsEqual } from '../utils/trip-id.util';
 
-export type DriverAvailability = 'online' | 'on_trip' | 'offline';
+export type DriverAvailability = 'online' | 'on_trip' | 'offline' | 'reconnecting';
 
 interface DriverState {
   status: DriverAvailability;
@@ -27,6 +27,16 @@ export class DriverStateService {
     state.status = 'online';
     state.activeTripId = null;
     this.logger.log(`Driver ${driverId} state → online`);
+  }
+
+  setReconnecting(driverId: string | number): void {
+    const state = this.getOrCreate(driverId);
+    state.status = 'reconnecting';
+    this.logger.log(`Driver ${driverId} state → reconnecting`);
+  }
+
+  isReconnecting(driverId: string | number): boolean {
+    return this.getOrCreate(driverId).status === 'reconnecting';
   }
 
   setOnTrip(
@@ -56,7 +66,8 @@ export class DriverStateService {
   }
 
   canReceiveOffers(driverId: string | number): boolean {
-    return !this.isOnTrip(driverId);
+    const status = this.getOrCreate(driverId).status;
+    return status === 'online' || status === 'reconnecting';
   }
 
   getActiveTripId(driverId: string | number): TripId | null {

@@ -3,9 +3,10 @@ import {
   BACKEND_BASE_URL,
   BACKEND_ENDPOINTS,
   BACKEND_SERVICE_TOKEN,
+  TRIP_LOOKUP_CACHE_TTL_MS,
   TRIP_STATUS,
 } from '../../config/app.config';
-import { normalizeTripId, TripId } from '../utils/trip-id.util';
+import { normalizeTripId, TripId, tripIdKey } from '../utils/trip-id.util';
 import {
   extractActiveTripId as parseActiveTripId,
   extractTripStatus,
@@ -31,6 +32,8 @@ export interface UpdateTripStatusParams {
   vehicleNo?: string;
   driversFeedback?: string;
   usersRating?: number;
+  lat?: string;
+  lng?: string;
 }
 
 const STATUS_LABELS: Record<number, string> = {
@@ -54,6 +57,43 @@ interface LiveTripRecord {
 @Injectable()
 export class BackendApiService {
   private readonly logger = new Logger(BackendApiService.name);
+  private readonly participantLookupCache = new Map<
+    string,
+    { data: TripId | null; at: number }
+  >();
+  private readonly tripStatusCache = new Map<
+    string,
+    { data: number | null; at: number }
+  >();
+
+  invalidateTripCache(tripId: TripId): void {
+    this.tripStatusCache.delete(tripIdKey(tripId));
+    this.participantLookupCache.clear();
+    this.logger.debug(`Invalidated trip lookup cache for trip ${tripIdKey(tripId)}`);
+  }
+
+  private readCache<T>(
+    cache: Map<string, { data: T; at: number }>,
+    key: string,
+  ): T | undefined {
+    const entry = cache.get(key);
+    if (!entry) {
+      return undefined;
+    }
+    if (Date.now() - entry.at >= TRIP_LOOKUP_CACHE_TTL_MS) {
+      cache.delete(key);
+      return undefined;
+    }
+    return entry.data;
+  }
+
+  private writeCache<T>(
+    cache: Map<string, { data: T; at: number }>,
+    key: string,
+    data: T,
+  ): void {
+    cache.set(key, { data, at: Date.now() });
+  }
 
   private buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
@@ -70,7 +110,7 @@ export class BackendApiService {
   private async request<T>(
     path: string,
     init: RequestInit,
-  ): Promise<{ ok: boolean; data?: T; status?: number }> {
+  ): Promise<{ ok: boolean; data?: T; status?: number; rawBody?: string }> {
     try {
       const res = await fetch(`${BACKEND_BASE_URL}${path}`, {
         ...init,
@@ -85,21 +125,32 @@ export class BackendApiService {
         return { ok: true, status: 204 };
       }
 
+      let parsed: T | undefined;
+      if (responseText) {
+        try {
+          parsed = JSON.parse(responseText) as T;
+        } catch {
+          parsed = undefined;
+        }
+      }
+
       if (!res.ok) {
-        this.logger.warn(`${path} returned HTTP ${res.status}`);
-        return { ok: false, status: res.status };
+        this.logger.warn(
+          `${path} returned HTTP ${res.status}: ${responseText || '(empty)'}`,
+        );
+        return { ok: false, status: res.status, data: parsed, rawBody: responseText };
       }
 
       if (!responseText) {
         return { ok: true };
       }
 
-      try {
-        return { ok: true, data: JSON.parse(responseText) as T };
-      } catch {
+      if (parsed === undefined) {
         this.logger.warn(`${path} returned non-JSON response`);
-        return { ok: true };
+        return { ok: true, rawBody: responseText };
       }
+
+      return { ok: true, data: parsed, rawBody: responseText };
     } catch (err) {
       this.logger.error(`${path} request failed: ${(err as Error).message}`);
       return { ok: false };
@@ -137,31 +188,57 @@ export class BackendApiService {
       vehicleNo,
       driversFeedback,
       usersRating,
+      lat,
+      lng,
     } = params;
     const statusLabel = STATUS_LABELS[status] ?? `STATUS_${status}`;
 
-    const body: Record<string, unknown> = {
-      id: tripId,
-      status: String(status),
-    };
-    if (driverId !== undefined) body.driverId = driverId;
-    if (userId !== undefined) body.userId = userId;
-    if (reason !== undefined) body.reason = reason;
-    if (vehicleNo !== undefined) body.vehicleNo = vehicleNo;
-    if (driversFeedback !== undefined) body.driversFeedback = driversFeedback;
-    if (usersRating !== undefined) body.usersRating = usersRating;
+    const requiresCoordinates =
+      status === TRIP_STATUS.STARTED || status === TRIP_STATUS.COMPLETED;
+
+    if (requiresCoordinates && (!lat || !lng)) {
+      this.logger.warn(
+        `[backend] updateTripStatus(${statusLabel}) missing lat/lng for trip ${tripId}`,
+      );
+      return false;
+    }
+
+    let body: Record<string, unknown>;
+
+    if (requiresCoordinates) {
+      body = {
+        id: tripId,
+        status,
+        lat,
+        lng,
+      };
+    } else {
+      body = {
+        id: tripId,
+        status: String(status),
+      };
+      if (driverId !== undefined) body.driverId = driverId;
+      if (userId !== undefined) body.userId = userId;
+      if (reason !== undefined) body.reason = reason;
+      if (vehicleNo !== undefined) body.vehicleNo = vehicleNo;
+      if (driversFeedback !== undefined) body.driversFeedback = driversFeedback;
+      if (usersRating !== undefined) body.usersRating = usersRating;
+    }
+
+    const requestBody = JSON.stringify(body);
 
     const result = await this.request<Record<string, unknown>>(
       BACKEND_ENDPOINTS.PATCH_LIVE_TRIP,
       {
         method: 'PATCH',
-        body: JSON.stringify(body),
+        body: requestBody,
       },
     );
 
     if (!result.ok) {
       this.logger.warn(
-        `[backend] updateTripStatus(${statusLabel}) failed for trip ${tripId} — HTTP ${result.status ?? 'error'}`,
+        `[backend] updateTripStatus(${statusLabel}) failed for trip ${tripId} — ` +
+          `request=${requestBody} response=${result.rawBody ?? JSON.stringify(result.data ?? null)}`,
       );
       return false;
     }
@@ -169,12 +246,14 @@ export class BackendApiService {
     const success = result.data ? this.isSuccessResponse(result.data) : true;
     if (!success) {
       this.logger.warn(
-        `[backend] updateTripStatus(${statusLabel}) rejected for trip ${tripId} — response=${JSON.stringify(result.data)}`,
+        `[backend] updateTripStatus(${statusLabel}) rejected for trip ${tripId} — ` +
+          `request=${requestBody} response=${result.rawBody ?? JSON.stringify(result.data)}`,
       );
     } else {
       this.logger.log(
-        `[backend] updateTripStatus(${statusLabel}) succeeded for trip ${tripId}`,
+        `[backend] updateTripStatus(${statusLabel}) succeeded for trip ${tripId} — request=${requestBody}`,
       );
+      this.invalidateTripCache(tripId);
     }
 
     return success;
@@ -212,6 +291,18 @@ export class BackendApiService {
     driverId?: string | number;
     userId?: string | number;
   }): Promise<TripId | null> {
+    const cacheKey = query.driverId
+      ? `driver:${String(query.driverId)}`
+      : `user:${String(query.userId)}`;
+
+    const cached = this.readCache(this.participantLookupCache, cacheKey);
+    if (cached !== undefined) {
+      this.logger.debug(
+        `[backend] getLiveTripData cache hit (${cacheKey}) → ${cached ?? 'none'}`,
+      );
+      return cached;
+    }
+
     const param = query.driverId
       ? `driverId=${encodeURIComponent(String(query.driverId))}`
       : `userId=${encodeURIComponent(String(query.userId))}`;
@@ -229,6 +320,7 @@ export class BackendApiService {
     }
 
     const activeTripId = parseActiveTripId(result.data, query);
+    this.writeCache(this.participantLookupCache, cacheKey, activeTripId);
     if (activeTripId) {
       const trips = Array.isArray(
         (result.data as Record<string, unknown>).data,
@@ -268,6 +360,12 @@ export class BackendApiService {
   }
 
   async fetchTripStatus(tripId: TripId): Promise<number | null> {
+    const cacheKey = tripIdKey(tripId);
+    const cached = this.readCache(this.tripStatusCache, cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     const param = `id=${encodeURIComponent(String(tripId))}`;
 
     const result = await this.request<Record<string, unknown>>(
@@ -283,6 +381,7 @@ export class BackendApiService {
     }
 
     const status = extractTripStatus(result.data, tripId);
+    this.writeCache(this.tripStatusCache, cacheKey, status);
     this.logger.log(
       `[backend] getLiveTripData (${param}) → status ${status ?? 'unknown'}`,
     );

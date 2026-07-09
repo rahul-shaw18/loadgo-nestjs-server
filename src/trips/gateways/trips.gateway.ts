@@ -22,11 +22,32 @@ import { TripLifecycleService } from '../services/trip-lifecycle.service';
 import type { SocketAck } from '../services/trip-lifecycle.service';
 import { DriverStateService } from '../services/driver-state.service';
 import { TripRejectionCooldownService } from '../services/trip-rejection-cooldown.service';
+import { SocketRegistrationService } from '../services/socket-registration.service';
+import { DriverDisconnectTrackerService } from '../services/driver-disconnect-tracker.service';
+import { PendingTerminalService } from '../services/pending-terminal.service';
 import { EVENTS } from '../../config/events.constant';
-import { LOCATION_UPDATE_THROTTLE_MS, TRIP_STATUS } from '../../config/app.config';
+import {
+  LOCATION_UPDATE_THROTTLE_MS,
+  SOCKET_PING_INTERVAL_MS,
+  SOCKET_PING_TIMEOUT_MS,
+  TRIP_STATUS,
+} from '../../config/app.config';
 import { normalizeTripId, TripId, tripIdKey, tripIdsEqual } from '../utils/trip-id.util';
+import {
+  DriverCoordinatePayload,
+  DriverCoordinates,
+  resolveDriverCoordinates,
+} from '../utils/coordinates.util';
+import {
+  TripCompletedSocketDto,
+  TripStartedSocketDto,
+} from '../dto/trip.dto';
 
-@WebSocketGateway({ cors: { origin: '*' } })
+@WebSocketGateway({
+  cors: { origin: '*' },
+  pingInterval: SOCKET_PING_INTERVAL_MS,
+  pingTimeout: SOCKET_PING_TIMEOUT_MS,
+})
 export class TripsGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
@@ -45,8 +66,7 @@ export class TripsGateway
   // Throttle high-frequency GPS updates per driver
   private lastLocationUpdateAt = new Map<string, number>();
 
-  // Drivers who disconnected mid-trip — emit DRIVER_RECONNECTED on next register
-  private driversDisconnectedOnTrip = new Set<string>();
+  private readonly driverRegisterChains = new Map<string, Promise<void>>();
 
   constructor(
     private readonly connectionManager: ConnectionManagerService,
@@ -60,6 +80,9 @@ export class TripsGateway
     private readonly tripLifecycle: TripLifecycleService,
     private readonly driverState: DriverStateService,
     private readonly rejectionCooldown: TripRejectionCooldownService,
+    private readonly socketRegistration: SocketRegistrationService,
+    private readonly disconnectTracker: DriverDisconnectTrackerService,
+    private readonly pendingTerminal: PendingTerminalService,
   ) {}
 
   afterInit(server: Server) {
@@ -74,6 +97,8 @@ export class TripsGateway
   }
 
   handleDisconnect(client: Socket) {
+    this.socketRegistration.clearSocket(client.id);
+
     const driverId = this.connectionManager.removeDriverBySocketId(client.id);
     const userId = this.connectionManager.removeUserBySocketId(client.id);
 
@@ -86,7 +111,7 @@ export class TripsGateway
           `[disconnect] Driver ${driverId} disconnected during active trip ${activeTripId} (socket ${client.id})`,
         );
         this.offerManager.onDriverDisconnectDuringActiveTrip(driverId);
-        this.driversDisconnectedOnTrip.add(String(driverId));
+        this.disconnectTracker.recordDisconnect(driverId, client.id);
         this.emitDriverConnectionEvent(
           EVENTS.DRIVER_DISCONNECTED,
           activeTripId,
@@ -110,24 +135,56 @@ export class TripsGateway
     }
   }
 
-  private async resolveActiveTripId(
-    providedTripId: string | number | null | undefined,
+  private async withDriverRegisterLock<T>(
+    driverId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.driverRegisterChains.get(driverId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous.then(() => gate);
+    this.driverRegisterChains.set(driverId, chained);
+
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.driverRegisterChains.get(driverId) === chained) {
+        this.driverRegisterChains.delete(driverId);
+      }
+    }
+  }
+
+  private async resolveRestoredTripId(
+    entityId: string | number,
+    providedTripId: TripId | null | undefined,
+    skipTripRestore: boolean,
     fetchActiveTrip: () => Promise<TripId | null>,
-    options?: { skipRestore?: boolean },
   ): Promise<TripId | null> {
-    if (options?.skipRestore) {
-      this.logger.log(
-        '[rejoin] skipTripRestore=true — not calling getLiveTripData.php',
-      );
-      return normalizeTripId(providedTripId);
+    if (skipTripRestore) {
+      return normalizeTripId(providedTripId ?? undefined);
     }
 
-    const normalizedProvided = normalizeTripId(providedTripId);
+    const normalizedProvided = normalizeTripId(providedTripId ?? undefined);
     if (normalizedProvided) {
+      if (this.pendingTerminal.isBlocked(entityId, normalizedProvided)) {
+        return null;
+      }
       return normalizedProvided;
     }
 
-    return fetchActiveTrip();
+    const restored = await fetchActiveTrip();
+    if (restored && this.pendingTerminal.isBlocked(entityId, restored)) {
+      this.logger.warn(
+        `[rejoin] Skipping restore for ${entityId} trip ${tripIdKey(restored)} — pending terminal attempt`,
+      );
+      return null;
+    }
+
+    return restored;
   }
 
   private clearDriverTripAssociation(
@@ -303,6 +360,26 @@ export class TripsGateway
     return vehicleNo ?? this.driverState.getVehicleNo(driverId);
   }
 
+  private resolveEventCoordinates(
+    tripId: TripId,
+    payload: DriverCoordinatePayload,
+  ): DriverCoordinates | null {
+    const fromPayload = resolveDriverCoordinates(payload);
+    if (fromPayload) {
+      return fromPayload;
+    }
+
+    const cached = this.locationCache.get(tripId);
+    if (!cached) {
+      return null;
+    }
+
+    return resolveDriverCoordinates({
+      latitude: cached.latitude,
+      longitude: cached.longitude,
+    });
+  }
+
   private isValidCoordinate(latitude: number, longitude: number): boolean {
     return (
       Number.isFinite(latitude) &&
@@ -404,54 +481,108 @@ export class TripsGateway
       tripId?: string | number | null;
       skipTripRestore?: boolean;
     },
-  ) {
-    this.logger.log(`Received ${EVENTS.REGISTER_DRIVER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
+  ): Promise<SocketAck | void> {
+    this.logger.log(
+      `Received ${EVENTS.REGISTER_DRIVER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
+    );
     const { driverId, tripId, skipTripRestore } = payload;
     if (!driverId) {
       this.logger.warn('REGISTER_DRIVER called without driverId');
-      return;
+      return { ok: false, message: 'Driver not registered' };
     }
 
-    const previousTripId = this.driverState.getActiveTripId(driverId);
+    const skipRestore = skipTripRestore === true;
+    if (
+      this.socketRegistration.isDuplicateDriverRegister(
+        client.id,
+        driverId,
+        tripId,
+        skipRestore,
+      )
+    ) {
+      return { ok: true, duplicate: true };
+    }
 
-    this.connectionManager.addDriver(driverId, client.id);
-    this.connectionManager.joinDriverPersonalRoom(this.server, driverId, client);
-    this.disconnectGrace.cancelDriverCleanup(driverId);
+    return this.withDriverRegisterLock(String(driverId), async () => {
+      const previousTripId = this.driverState.getActiveTripId(driverId);
+      const blockedTripId = normalizeTripId(tripId ?? undefined);
 
-    const activeTripId = await this.resolveActiveTripId(
-      tripId ?? undefined,
-      () => this.backendApi.fetchDriverActiveTrip(driverId),
-      { skipRestore: skipTripRestore === true },
-    );
+      if (
+        blockedTripId &&
+        this.pendingTerminal.isBlocked(driverId, blockedTripId)
+      ) {
+        this.socketRegistration.recordDriverRegister(
+          client.id,
+          driverId,
+          tripId,
+          skipRestore,
+        );
+        return {
+          ok: false,
+          retryComplete: true,
+          tripId: blockedTripId,
+          message: 'Recent trip completion failed — retry required',
+        };
+      }
 
-    if (activeTripId) {
-      client.join(this.connectionManager.tripRoom(activeTripId));
-      this.driverState.setOnTrip(driverId, activeTripId);
-      this.tripParticipants.setDriver(activeTripId, driverId);
-      this.logger.log(
-        `[rejoin] Driver ${driverId} joined active trip ${activeTripId} | ${this.tripEventEmitter.getRoomDebugInfo(this.server, activeTripId)}`,
+      this.connectionManager.addDriver(driverId, client.id);
+      this.connectionManager.joinDriverPersonalRoom(this.server, driverId, client);
+      this.disconnectGrace.cancelDriverCleanup(driverId);
+
+      if (this.driverState.isReconnecting(driverId)) {
+        this.driverState.setOnline(driverId);
+      }
+
+      const activeTripId = await this.resolveRestoredTripId(
+        driverId,
+        tripId,
+        skipRestore,
+        () => this.backendApi.fetchDriverActiveTrip(driverId),
       );
 
-      if (this.driversDisconnectedOnTrip.has(String(driverId))) {
-        this.driversDisconnectedOnTrip.delete(String(driverId));
-        this.emitDriverConnectionEvent(
-          EVENTS.DRIVER_RECONNECTED,
-          activeTripId,
-          driverId,
+      if (activeTripId) {
+        this.connectionManager.joinSocketToTripRoom(client, activeTripId);
+        this.driverState.setOnTrip(driverId, activeTripId);
+        this.tripParticipants.setDriver(activeTripId, driverId);
+        this.logger.log(
+          `[rejoin] Driver ${driverId} joined active trip ${activeTripId} | ${this.tripEventEmitter.getRoomDebugInfo(this.server, activeTripId)}`,
+        );
+
+        if (
+          this.disconnectTracker.shouldEmitDriverReconnected(
+            driverId,
+            client.id,
+          )
+        ) {
+          this.disconnectTracker.clearDisconnectFlag(driverId);
+          this.emitDriverConnectionEvent(
+            EVENTS.DRIVER_RECONNECTED,
+            activeTripId,
+            driverId,
+          );
+        }
+      } else {
+        this.clearDriverTripAssociation(driverId, previousTripId);
+        this.logger.log(`[rejoin] Driver ${driverId} registered (no active trip)`);
+      }
+
+      this.socketRegistration.recordDriverRegister(
+        client.id,
+        driverId,
+        tripId,
+        skipRestore,
+      );
+
+      if (this.driverState.canReceiveOffers(driverId)) {
+        this.offerManager.restoreQueuedOfferOnRegister(this.server, driverId);
+      } else {
+        this.logger.log(
+          `[rejoin] Driver ${driverId} on active trip — skipping offer flow`,
         );
       }
-    } else {
-      this.clearDriverTripAssociation(driverId, previousTripId);
-      this.logger.log(`[rejoin] Driver ${driverId} registered (no active trip)`);
-    }
 
-    if (this.driverState.canReceiveOffers(driverId)) {
-      this.offerManager.offerNextTrip(this.server, driverId);
-    } else {
-      this.logger.log(
-        `[rejoin] Driver ${driverId} on active trip — skipping offer flow`,
-      );
-    }
+      return { ok: true };
+    });
   }
 
   @SubscribeMessage(EVENTS.REGISTER_USER)
@@ -463,24 +594,39 @@ export class TripsGateway
       tripId?: string | number | null;
       skipTripRestore?: boolean;
     },
-  ) {
-    this.logger.log(`Received ${EVENTS.REGISTER_USER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`);
+  ): Promise<SocketAck | void> {
+    this.logger.log(
+      `Received ${EVENTS.REGISTER_USER} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
+    );
     const { userId, tripId, skipTripRestore } = payload;
     if (!userId) {
       this.logger.warn('REGISTER_USER called without userId');
-      return;
+      return { ok: false, message: 'User not registered' };
+    }
+
+    const skipRestore = skipTripRestore === true;
+    if (
+      this.socketRegistration.isDuplicateUserRegister(
+        client.id,
+        userId,
+        tripId,
+        skipRestore,
+      )
+    ) {
+      return { ok: true, duplicate: true };
     }
 
     this.connectionManager.addUser(userId, client.id);
 
-    const activeTripId = await this.resolveActiveTripId(
-      tripId ?? undefined,
+    const activeTripId = await this.resolveRestoredTripId(
+      userId,
+      tripId,
+      skipRestore,
       () => this.backendApi.fetchUserActiveTrip(userId),
-      { skipRestore: skipTripRestore === true },
     );
 
     if (activeTripId) {
-      client.join(this.connectionManager.tripRoom(activeTripId));
+      this.connectionManager.joinSocketToTripRoom(client, activeTripId);
       this.logger.log(
         `[rejoin] User ${userId} joined trip room ${activeTripId} | ${this.tripEventEmitter.getRoomDebugInfo(this.server, activeTripId)}`,
       );
@@ -490,6 +636,15 @@ export class TripsGateway
       this.clearUserTripAssociation(userId, normalizeTripId(tripId));
       this.logger.log(`[rejoin] User ${userId} registered (no active trip)`);
     }
+
+    this.socketRegistration.recordUserRegister(
+      client.id,
+      userId,
+      tripId,
+      skipRestore,
+    );
+
+    return { ok: true };
   }
 
   @SubscribeMessage(EVENTS.TRIP_ACCEPTED)
@@ -525,39 +680,35 @@ export class TripsGateway
 
     try {
       const vehicleNo = this.cacheVehicleNo(driverId, payload.vehicleNo);
-
-      const accepted = await this.backendApi.updateTripStatus({
+      const acceptPayload = {
         tripId: normalizedTripId,
-        status: TRIP_STATUS.ACCEPTED,
         driverId,
-        vehicleNo,
-      });
+        ...(vehicleNo && { vehicleNo }),
+      };
 
-      if (!accepted) {
-        this.logger.warn(
-          `[accept] Backend rejected trip ${normalizedTripId} for driver ${driverId} — ${EVENTS.TRIP_ACCEPTED} will NOT be emitted`,
-        );
+      const acceptResult = await this.tripLifecycle.processAcceptLifecycle(
+        this.server,
+        client,
+        {
+          tripId: normalizedTripId,
+          driverId,
+          vehicleNo,
+          broadcastPayload: acceptPayload,
+          context: 'socket-accept',
+        },
+      );
+
+      if (!acceptResult.ok) {
         this.driverQueue.removeTripFromDriver(driverId, normalizedTripId);
         if (this.driverState.canReceiveOffers(driverId)) {
           this.offerManager.offerNextTrip(this.server, driverId);
         }
-        return { ok: false, message: 'Backend rejected status update' };
+        return acceptResult;
       }
 
-      this.driverState.setOnTrip(driverId, normalizedTripId, vehicleNo);
-      client.join(this.connectionManager.tripRoom(normalizedTripId));
-      this.tripParticipants.setDriver(normalizedTripId, driverId);
-
-      const acceptPayload = { tripId: normalizedTripId, driverId, ...(vehicleNo && { vehicleNo }) };
-
-      this.tripEventEmitter.emitToTripRoom(
-        this.server,
-        normalizedTripId,
-        EVENTS.TRIP_ACCEPTED,
-        acceptPayload,
-        'socket-accept',
-        { driverId },
-      );
+      if (acceptResult.duplicate) {
+        return acceptResult;
+      }
 
       const participants = this.tripParticipants.get(normalizedTripId);
       if (participants?.userId) {
@@ -590,11 +741,13 @@ export class TripsGateway
         driverId,
       );
 
+      this.pendingTerminal.clearAttempt(driverId, normalizedTripId);
+
       this.logger.log(
         `[accept] Trip ${normalizedTripId} acceptance complete | ${this.tripEventEmitter.getRoomDebugInfo(this.server, normalizedTripId)}`,
       );
 
-      return { ok: true };
+      return acceptResult;
     } catch (err) {
       this.logger.error(
         `Failed to accept trip ${normalizedTripId}: ${(err as Error).message}`,
@@ -608,12 +761,7 @@ export class TripsGateway
   @SubscribeMessage(EVENTS.TRIP_STARTED)
   async handleTripStarted(
     @ConnectedSocket() client: Socket,
-    @MessageBody()
-    payload: {
-      tripId: number | string;
-      driverId?: string | number;
-      vehicleNo?: string;
-    },
+    @MessageBody() payload: TripStartedSocketDto,
   ): Promise<SocketAck> {
     this.logger.log(
       `Received ${EVENTS.TRIP_STARTED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
@@ -629,6 +777,11 @@ export class TripsGateway
       return { ok: false, message: 'Invalid tripId' };
     }
 
+    const coordinates = this.resolveEventCoordinates(tripId, payload);
+    if (!coordinates) {
+      return { ok: false, message: 'Invalid coordinates' };
+    }
+
     const vehicleNo = this.cacheVehicleNo(driverId, payload.vehicleNo);
 
     return this.tripLifecycle.processDriverLifecycle(this.server, client, {
@@ -637,7 +790,15 @@ export class TripsGateway
       tripId,
       driverId,
       vehicleNo,
-      broadcastPayload: { tripId, driverId, ...(vehicleNo && { vehicleNo }) },
+      lat: coordinates.lat,
+      lng: coordinates.lng,
+      broadcastPayload: {
+        tripId,
+        driverId,
+        lat: coordinates.lat,
+        lng: coordinates.lng,
+        ...(vehicleNo && { vehicleNo }),
+      },
       context: 'socket-started',
     });
   }
@@ -645,14 +806,7 @@ export class TripsGateway
   @SubscribeMessage(EVENTS.TRIP_COMPLETED)
   async handleTripCompleted(
     @ConnectedSocket() client: Socket,
-    @MessageBody()
-    payload: {
-      tripId: number | string;
-      driverId?: string | number;
-      vehicleNo?: string;
-      driversFeedback?: string;
-      feedbackUsersRating?: number;
-    },
+    @MessageBody() payload: TripCompletedSocketDto,
   ): Promise<SocketAck> {
     this.logger.log(
       `Received ${EVENTS.TRIP_COMPLETED} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
@@ -668,6 +822,11 @@ export class TripsGateway
       return { ok: false, message: 'Invalid tripId' };
     }
 
+    const coordinates = this.resolveEventCoordinates(tripId, payload);
+    if (!coordinates) {
+      return { ok: false, message: 'Invalid coordinates' };
+    }
+
     const vehicleNo = this.cacheVehicleNo(driverId, payload.vehicleNo);
 
     const result = await this.tripLifecycle.processDriverLifecycle(
@@ -679,11 +838,15 @@ export class TripsGateway
         tripId,
         driverId,
         vehicleNo,
+        lat: coordinates.lat,
+        lng: coordinates.lng,
         driversFeedback: payload.driversFeedback,
         usersRating: payload.feedbackUsersRating,
         broadcastPayload: {
           tripId,
           driverId,
+          lat: coordinates.lat,
+          lng: coordinates.lng,
           ...(vehicleNo && { vehicleNo }),
           ...(payload.driversFeedback !== undefined && {
             driversFeedback: payload.driversFeedback,
