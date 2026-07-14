@@ -25,6 +25,7 @@ import { TripRejectionCooldownService } from '../services/trip-rejection-cooldow
 import { SocketRegistrationService } from '../services/socket-registration.service';
 import { DriverDisconnectTrackerService } from '../services/driver-disconnect-tracker.service';
 import { PendingTerminalService } from '../services/pending-terminal.service';
+import { TripAcceptanceCacheService } from '../services/trip-acceptance-cache.service';
 import { EVENTS } from '../../config/events.constant';
 import {
   LOCATION_UPDATE_THROTTLE_MS,
@@ -56,13 +57,6 @@ export class TripsGateway
 
   private readonly logger = new Logger(TripsGateway.name);
 
-  // Cache of recently accepted trips to handle users who join a room "late"
-  // Map<tripId, { tripId, driverId }>
-  private recentAcceptances = new Map<
-    string,
-    { tripId: TripId; driverId: string | number }
-  >();
-
   // Throttle high-frequency GPS updates per driver
   private lastLocationUpdateAt = new Map<string, number>();
 
@@ -83,6 +77,7 @@ export class TripsGateway
     private readonly socketRegistration: SocketRegistrationService,
     private readonly disconnectTracker: DriverDisconnectTrackerService,
     private readonly pendingTerminal: PendingTerminalService,
+    private readonly acceptanceCache: TripAcceptanceCacheService,
   ) {}
 
   afterInit(server: Server) {
@@ -98,6 +93,7 @@ export class TripsGateway
 
   handleDisconnect(client: Socket) {
     this.socketRegistration.clearSocket(client.id);
+    this.offerManager.clearSocketOfferTracking(client.id);
 
     const driverId = this.connectionManager.removeDriverBySocketId(client.id);
     const userId = this.connectionManager.removeUserBySocketId(client.id);
@@ -285,8 +281,14 @@ export class TripsGateway
       `[rejoin-sync] User ${userId} rejoined trip ${tripId} — checking cached state`,
     );
 
-    const cachedAcceptance = this.recentAcceptances.get(tripIdKey(tripId));
+    const cachedAcceptance =
+      this.acceptanceCache.get(tripId) ??
+      this.reconstructAcceptanceFromActiveState(tripId);
+
     if (cachedAcceptance) {
+      if (!this.acceptanceCache.get(tripId)) {
+        this.acceptanceCache.set(cachedAcceptance);
+      }
       this.logger.log(
         `[rejoin-sync] Pushing ${EVENTS.TRIP_ACCEPTED} to user ${userId} for trip ${tripId}: ${JSON.stringify(cachedAcceptance)}`,
       );
@@ -310,8 +312,32 @@ export class TripsGateway
     }
   }
 
+  private reconstructAcceptanceFromActiveState(tripId: TripId) {
+    const participants = this.tripParticipants.get(tripId);
+    const driverId =
+      participants?.driverId ?? this.driverState.findDriverOnTrip(tripId);
+
+    if (!driverId) {
+      return null;
+    }
+
+    if (
+      !this.driverState.isAssigneeForTrip(driverId, tripId) &&
+      !participants?.driverId
+    ) {
+      return null;
+    }
+
+    const vehicleNo = this.driverState.getVehicleNo(driverId);
+    return {
+      tripId,
+      driverId,
+      ...(vehicleNo ? { vehicleNo } : {}),
+    };
+  }
+
   private clearAcceptanceCache(tripId: TripId): void {
-    this.recentAcceptances.delete(tripIdKey(tripId));
+    this.acceptanceCache.clear(tripId);
   }
 
   private resolveDriverId(
@@ -500,6 +526,15 @@ export class TripsGateway
         skipRestore,
       )
     ) {
+      if (
+        (tripId === null || tripId === undefined) &&
+        this.driverState.isOnTrip(driverId)
+      ) {
+        this.clearDriverTripAssociation(driverId);
+        this.logger.log(
+          `[rejoin] Driver ${driverId} duplicate register cleared stale on_trip state`,
+        );
+      }
       return { ok: true, duplicate: true };
     }
 
@@ -574,7 +609,11 @@ export class TripsGateway
       );
 
       if (this.driverState.canReceiveOffers(driverId)) {
-        this.offerManager.restoreQueuedOfferOnRegister(this.server, driverId);
+        await this.offerManager.recoverPendingOffersOnRegister(
+          this.server,
+          driverId,
+          client.id,
+        );
       } else {
         this.logger.log(
           `[rejoin] Driver ${driverId} on active trip — skipping offer flow`,
@@ -724,9 +763,6 @@ export class TripsGateway
           `[accept] No userId registered for trip ${normalizedTripId} — user must rejoin or fetch via HTTP`,
         );
       }
-
-      this.recentAcceptances.set(tripIdKey(normalizedTripId), acceptPayload);
-      setTimeout(() => this.clearAcceptanceCache(normalizedTripId), 5 * 60 * 1000);
 
       this.tripEventEmitter.emitAcceptedByOtherDrivers(
         this.server,
@@ -952,6 +988,13 @@ export class TripsGateway
       return { ok: false, message: 'Invalid tripId' };
     }
 
+    if (this.shouldIgnoreRejection(driverId, normalizedTripId)) {
+      this.logger.log(
+        `[reject] Ignoring TRIP_REJECTED from driver ${driverId} for trip ${normalizedTripId} — trip already accepted / past offer stage`,
+      );
+      return { ok: true, duplicate: true };
+    }
+
     this.rejectionCooldown.recordRejection(
       driverId,
       normalizedTripId,
@@ -967,6 +1010,34 @@ export class TripsGateway
     }
 
     return { ok: true };
+  }
+
+  private shouldIgnoreRejection(
+    driverId: string | number,
+    tripId: TripId,
+  ): boolean {
+    if (this.driverState.isAssigneeForTrip(driverId, tripId)) {
+      return true;
+    }
+
+    if (this.driverState.isOnTrip(driverId)) {
+      return true;
+    }
+
+    const acceptance = this.acceptanceCache.get(tripId);
+    if (acceptance && String(acceptance.driverId) === String(driverId)) {
+      return true;
+    }
+
+    const participants = this.tripParticipants.get(tripId);
+    if (
+      participants?.driverId &&
+      String(participants.driverId) === String(driverId)
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   @SubscribeMessage(EVENTS.TRIP_CANCELLED_BY_USER)

@@ -16,6 +16,7 @@ import { SocketRegistrationService } from './services/socket-registration.servic
 import { DriverDisconnectTrackerService } from './services/driver-disconnect-tracker.service';
 import { PendingTerminalService } from './services/pending-terminal.service';
 import { TripLifecycleLockService } from './services/trip-lifecycle-lock.service';
+import { TripAcceptanceCacheService } from './services/trip-acceptance-cache.service';
 
 @Module({
   controllers: [TripsController],
@@ -36,6 +37,7 @@ import { TripLifecycleLockService } from './services/trip-lifecycle-lock.service
     DriverDisconnectTrackerService,
     PendingTerminalService,
     TripLifecycleLockService,
+    TripAcceptanceCacheService,
   ],
 })
 export class TripsModule {}
