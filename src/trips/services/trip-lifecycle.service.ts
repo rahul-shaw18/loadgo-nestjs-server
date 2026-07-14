@@ -11,6 +11,8 @@ import { DriverStateService } from './driver-state.service';
 import { TripLifecycleLockService } from './trip-lifecycle-lock.service';
 import { PendingTerminalService } from './pending-terminal.service';
 import { DriverDisconnectTrackerService } from './driver-disconnect-tracker.service';
+import { TripAcceptanceCacheService } from './trip-acceptance-cache.service';
+import { TripRejectionCooldownService } from './trip-rejection-cooldown.service';
 import { EVENTS } from '../../config/events.constant';
 import { TripId } from '../utils/trip-id.util';
 
@@ -37,6 +39,8 @@ export class TripLifecycleService {
     private readonly lifecycleLock: TripLifecycleLockService,
     private readonly pendingTerminal: PendingTerminalService,
     private readonly disconnectTracker: DriverDisconnectTrackerService,
+    private readonly acceptanceCache: TripAcceptanceCacheService,
+    private readonly rejectionCooldown: TripRejectionCooldownService,
   ) {}
 
   validateDriverTripRoom(
@@ -85,6 +89,30 @@ export class TripLifecycleService {
     this.locationCache.clear(tripId);
     this.tripParticipants.clear(tripId);
     this.connectionManager.leaveTripRoom(io, tripId);
+  }
+
+  /**
+   * Releases the assignee driver and clears all in-memory trip state.
+   * Resolves the driver from trip participants when not supplied explicitly.
+   */
+  private finalizeTerminalTrip(
+    io: Server,
+    tripId: TripId,
+    driverId?: string | number,
+  ): void {
+    const assigneeDriverId =
+      driverId ??
+      this.tripParticipants.get(tripId)?.driverId ??
+      this.driverState.findDriverOnTrip(tripId) ??
+      undefined;
+
+    if (assigneeDriverId) {
+      this.driverState.setOnline(assigneeDriverId);
+      this.disconnectTracker.clearDisconnectFlag(assigneeDriverId);
+    }
+
+    this.acceptanceCache.clear(tripId);
+    this.cleanupTerminalTrip(io, tripId);
   }
 
   private async isStatusAlreadyApplied(
@@ -203,8 +231,7 @@ export class TripLifecycleService {
       }
 
       if (params.terminal) {
-        this.cleanupTerminalTrip(io, params.tripId);
-        this.driverState.setOnline(params.driverId);
+        this.finalizeTerminalTrip(io, params.tripId, params.driverId);
         this.logger.log(
           `[${params.context}] Terminal cleanup complete for trip ${params.tripId}`,
         );
@@ -240,6 +267,11 @@ export class TripLifecycleService {
         this.logger.log(
           `[${params.context}] TRIP_ACCEPTED ignored trip ${params.tripId} — already accepted`,
         );
+        this.acceptanceCache.set({
+          tripId: params.tripId,
+          driverId: params.driverId,
+          vehicleNo: params.vehicleNo,
+        });
         return { ok: true, duplicate: true, tripId: params.tripId };
       }
 
@@ -259,6 +291,12 @@ export class TripLifecycleService {
       this.driverState.setOnTrip(params.driverId, params.tripId, params.vehicleNo);
       this.connectionManager.joinSocketToTripRoom(client, params.tripId);
       this.tripParticipants.setDriver(params.tripId, params.driverId);
+      this.rejectionCooldown.clearAllForTrip(params.tripId);
+      this.acceptanceCache.set({
+        tripId: params.tripId,
+        driverId: params.driverId,
+        vehicleNo: params.vehicleNo,
+      });
 
       this.tripEventEmitter.emitToTripRoom(
         io,
@@ -332,23 +370,26 @@ export class TripLifecycleService {
 
       this.tripParticipants.setUser(params.tripId, params.userId);
 
+      const assigneeDriverId =
+        this.tripParticipants.get(params.tripId)?.driverId ??
+        this.driverState.findDriverOnTrip(params.tripId) ??
+        undefined;
+
       this.tripEventEmitter.emitToTripRoom(
         io,
         params.tripId,
         params.event,
         params.broadcastPayload,
         params.context,
-        { userId: params.userId },
+        { userId: params.userId, driverId: assigneeDriverId },
       );
 
-      this.offerManager.clearAllOffersForTrip(io, params.tripId);
-      this.cleanupTerminalTrip(io, params.tripId);
-
-      const participants = this.tripParticipants.get(params.tripId);
-      if (participants?.driverId) {
-        this.driverState.setOnline(participants.driverId);
-        this.disconnectTracker.clearDisconnectFlag(participants.driverId);
-      }
+      this.offerManager.clearAllOffersForTrip(
+        io,
+        params.tripId,
+        assigneeDriverId,
+      );
+      this.finalizeTerminalTrip(io, params.tripId, assigneeDriverId);
 
       this.logger.log(
         `[${params.context}] ${params.event} complete | ${this.tripEventEmitter.getRoomDebugInfo(io, params.tripId)}`,

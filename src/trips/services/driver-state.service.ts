@@ -90,4 +90,17 @@ export class DriverStateService {
       tripIdsEqual(state.activeTripId, tripId)
     );
   }
+
+  findDriverOnTrip(tripId: TripId): string | null {
+    for (const [driverId, state] of this.states.entries()) {
+      if (
+        state.status === 'on_trip' &&
+        state.activeTripId !== null &&
+        tripIdsEqual(state.activeTripId, tripId)
+      ) {
+        return driverId;
+      }
+    }
+    return null;
+  }
 }

@@ -15,6 +15,7 @@ import { TripParticipantsService } from '../services/trip-participants.service';
 import { TripEventEmitterService } from '../services/trip-event-emitter.service';
 import { DriverStateService } from '../services/driver-state.service';
 import { TripRejectionCooldownService } from '../services/trip-rejection-cooldown.service';
+import { TripAcceptanceCacheService } from '../services/trip-acceptance-cache.service';
 import { NotifyNewTripDto, TripStatusUpdateDto } from '../dto/trip.dto';
 import { TripId } from '../utils/trip-id.util';
 import { EVENTS } from '../../config/events.constant';
@@ -56,6 +57,7 @@ export class TripsController {
     private readonly tripEventEmitter: TripEventEmitterService,
     private readonly driverState: DriverStateService,
     private readonly rejectionCooldown: TripRejectionCooldownService,
+    private readonly acceptanceCache: TripAcceptanceCacheService,
     private readonly tripsGateway: TripsGateway,
   ) {}
 
@@ -63,6 +65,7 @@ export class TripsController {
     this.locationCache.clear(tripId);
     this.tripParticipants.clear(tripId);
     this.rejectionCooldown.clearAllForTrip(tripId);
+    this.acceptanceCache.clear(tripId);
     this.logger.log(`Cleared tracking state for trip ${tripId}`);
   }
 
@@ -193,6 +196,7 @@ export class TripsController {
         case STATUS.ACCEPTED: {
           if (driverId) {
             this.driverState.setOnTrip(driverId, tripId);
+            this.acceptanceCache.set({ tripId, driverId });
           }
           this.rejectionCooldown.clearAllForTrip(tripId);
           const acceptPayload = { tripId, driverId };
@@ -218,6 +222,7 @@ export class TripsController {
         case STATUS.REVOKED: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
+          this.acceptanceCache.clear(tripId);
           this.tripEventEmitter.emitGlobally(
             io,
             EVENTS.TRIP_REVOKED,
@@ -299,6 +304,7 @@ export class TripsController {
         case STATUS.REQUEST_TIMEOUT: {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
+          this.acceptanceCache.clear(tripId);
           this.tripEventEmitter.emitGlobally(
             io,
             EVENTS.TRIP_REVOKED,
