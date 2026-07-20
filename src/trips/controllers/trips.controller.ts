@@ -16,6 +16,7 @@ import { TripEventEmitterService } from '../services/trip-event-emitter.service'
 import { DriverStateService } from '../services/driver-state.service';
 import { TripRejectionCooldownService } from '../services/trip-rejection-cooldown.service';
 import { TripAcceptanceCacheService } from '../services/trip-acceptance-cache.service';
+import { TripRequestTimeoutService } from '../services/trip-request-timeout.service';
 import { NotifyNewTripDto, TripStatusUpdateDto } from '../dto/trip.dto';
 import { TripId } from '../utils/trip-id.util';
 import { EVENTS } from '../../config/events.constant';
@@ -58,6 +59,7 @@ export class TripsController {
     private readonly driverState: DriverStateService,
     private readonly rejectionCooldown: TripRejectionCooldownService,
     private readonly acceptanceCache: TripAcceptanceCacheService,
+    private readonly tripRequestTimeout: TripRequestTimeoutService,
     private readonly tripsGateway: TripsGateway,
   ) {}
 
@@ -151,7 +153,7 @@ export class TripsController {
       '5=COMPLETED (emits TRIP_COMPLETED to room), ' +
       '6=CANCELLED_BY_USER (cleans queues, emits TRIP_CANCELLED_BY_USER), ' +
       '7=CANCELLED_BY_DRIVER (emits TRIP_CANCELLED_BY_DRIVER), ' +
-      '8=REQUEST_TIMEOUT (cleans queues, emits TRIP_REVOKED).',
+      '8=REQUEST_TIMEOUT (notifies user TRIP_REQUEST_TIMEOUT, cleans all state).',
   })
   @ApiBody({ type: TripStatusUpdateDto })
   @ApiResponse({
@@ -183,6 +185,13 @@ export class TripsController {
           '[trip-status-update] Socket.IO server is not initialized in TripsGateway',
         );
         return { ok: false, message: 'Socket server not ready' };
+      }
+
+      if (this.tripRequestTimeout.isTerminal(tripId)) {
+        this.logger.log(
+          `[trip-status-update] Trip ${tripId} is terminal — ignoring status ${statusCode}`,
+        );
+        return { ok: true, duplicate: true };
       }
 
       if (driverId) {
@@ -302,15 +311,7 @@ export class TripsController {
           break;
         }
         case STATUS.REQUEST_TIMEOUT: {
-          this.driverQueue.removeTripFromAllDrivers(tripId);
-          this.offerManager.clearAllOffersForTrip(io, tripId);
-          this.acceptanceCache.clear(tripId);
-          this.tripEventEmitter.emitGlobally(
-            io,
-            EVENTS.TRIP_REVOKED,
-            { tripId },
-            'trip-status-update:REQUEST_TIMEOUT',
-          );
+          this.tripRequestTimeout.handleRequestTimeout(io, tripId, userId);
           break;
         }
         default: {

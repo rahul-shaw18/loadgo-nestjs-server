@@ -9,7 +9,7 @@ export const BACKEND_SERVICE_TOKEN = process.env.BACKEND_SERVICE_TOKEN || '';
 // Timer durations (in milliseconds)
 export const SCREEN_TIMER_MS = 30 * 1000; // 30 seconds — time shown on driver screen per trip
 export const BACKGROUND_TIMER_MS = 5 * 60 * 1000; // 5 minutes — total lifetime of a trip in a driver's queue
-export const ROTATION_GAP_MS = 3 * 1000; // 3 seconds — gap between trip rotations
+export const ROTATION_GAP_MS = 5 * 1000; // 5 seconds — gap between trip rotations
 export const LOCATION_UPDATE_THROTTLE_MS = 1000; // 1 second — max location broadcasts per driver
 export const DISCONNECT_GRACE_MS = 30 * 1000; // 30 seconds — grace before driver queue cleanup
 export const REJECTION_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes — hide rejected trip from driver
@@ -31,6 +31,7 @@ export const TRIP_STATUS = {
   COMPLETED: 5,
   CANCELLED_BY_USER: 6,
   CANCELLED_BY_DRIVER: 7,
+  REQUEST_TIMEOUT: 8,
 } as const;
 
 export const BACKEND_ENDPOINTS = {

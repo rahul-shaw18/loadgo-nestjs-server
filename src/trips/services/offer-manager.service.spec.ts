@@ -4,10 +4,11 @@ import { ConnectionManagerService } from './connection-manager.service';
 import { DriverStateService } from './driver-state.service';
 import { TripRejectionCooldownService } from './trip-rejection-cooldown.service';
 import { BackendApiService } from './backend-api.service';
+import { TripEventEmitterService } from './trip-event-emitter.service';
 import { TRIP_STATUS } from '../../config/app.config';
 import { EVENTS } from '../../config/events.constant';
 
-describe('OfferManagerService — driver recovery', () => {
+describe('OfferManagerService', () => {
   let service: OfferManagerService;
   let driverQueue: DriverQueueService;
   let driverState: DriverStateService;
@@ -17,6 +18,7 @@ describe('OfferManagerService — driver recovery', () => {
     Pick<ConnectionManagerService, 'getDriverSocketId'>
   >;
   let backendApi: jest.Mocked<Pick<BackendApiService, 'fetchTripStatus'>>;
+  let tripEventEmitter: jest.Mocked<Pick<TripEventEmitterService, 'emitToTripRoom'>>;
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -34,6 +36,9 @@ describe('OfferManagerService — driver recovery', () => {
     backendApi = {
       fetchTripStatus: jest.fn().mockResolvedValue(TRIP_STATUS.REQUESTED),
     };
+    tripEventEmitter = {
+      emitToTripRoom: jest.fn(),
+    };
 
     service = new OfferManagerService(
       driverQueue,
@@ -43,6 +48,7 @@ describe('OfferManagerService — driver recovery', () => {
         isHidden: jest.fn().mockReturnValue(false),
       } as unknown as TripRejectionCooldownService,
       backendApi as unknown as BackendApiService,
+      tripEventEmitter as unknown as TripEventEmitterService,
     );
   });
 
@@ -51,44 +57,115 @@ describe('OfferManagerService — driver recovery', () => {
     jest.useRealTimers();
   });
 
-  it('re-emits INCOMING_TRIP with a fresh 30s timer when driver reconnects', async () => {
-    driverQueue.addTripToDriver(93, 901);
+  describe('sequential queue', () => {
+    it('presents only the first queued trip when multiple trips are assigned', async () => {
+      driverQueue.addTripToDriver(93, 1009);
+      driverQueue.addTripToDriver(93, 1012);
+      driverQueue.addTripToDriver(93, 1014);
 
-    await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
+      await service.advanceToNextOffer(io, 93, 'test');
 
-    expect(backendApi.fetchTripStatus).toHaveBeenCalledWith(901);
-    expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
-      tripId: 901,
-      screenTimeout: 30,
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 1009,
+        screenTimeout: 30,
+      });
+      expect(service.hasOffer(93)).toBe(true);
+      expect(driverQueue.getQueueTripIds(93)).toEqual([1009, 1012, 1014]);
     });
-    expect(service.hasOfferSentOnSocket('socket-93', 901)).toBe(true);
+
+    it('clears the entire queue when the driver accepts the active trip', () => {
+      driverQueue.addTripToDriver(93, 1009);
+      driverQueue.addTripToDriver(93, 1012);
+
+      const result = service.handleAccept(93, 1009);
+
+      expect(result.valid).toBe(true);
+      expect(driverQueue.getQueueSize(93)).toBe(0);
+      expect(service.hasOffer(93)).toBe(false);
+    });
+
+    it('presents the next valid trip after reject', async () => {
+      driverQueue.addTripToDriver(93, 1009);
+      driverQueue.addTripToDriver(93, 1012);
+
+      await service.advanceToNextOffer(io, 93, 'test');
+      service.handleReject(io, 93, 1009);
+
+      await jest.advanceTimersByTimeAsync(5000);
+
+      expect(emit).toHaveBeenCalledTimes(2);
+      expect(emit).toHaveBeenLastCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 1012,
+        screenTimeout: 30,
+      });
+    });
+
+    it('emits TRIP_REQUEST_TIMEOUT to the trip room when the offer screen timer expires', async () => {
+      driverQueue.addTripToDriver(93, 1009);
+
+      await service.advanceToNextOffer(io, 93, 'test');
+      await jest.advanceTimersByTimeAsync(30_000);
+
+      expect(tripEventEmitter.emitToTripRoom).toHaveBeenCalledWith(
+        io,
+        1009,
+        EVENTS.TRIP_REQUEST_TIMEOUT,
+        { tripId: 1009, driverId: '93' },
+        'offer-screen-timeout',
+        { driverId: '93' },
+      );
+    });
+
+    it('skips trips that are no longer pending and offers the next valid one', async () => {
+      driverQueue.addTripToDriver(93, 1009);
+      driverQueue.addTripToDriver(93, 1012);
+
+      backendApi.fetchTripStatus.mockImplementation(async (tripId) => {
+        if (tripId === 1009) return TRIP_STATUS.ACCEPTED;
+        return TRIP_STATUS.REQUESTED;
+      });
+
+      await service.advanceToNextOffer(io, 93, 'test');
+
+      expect(driverQueue.hasTripInQueue(93, 1009)).toBe(false);
+      expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 1012,
+        screenTimeout: 30,
+      });
+    });
   });
 
-  it('skips trips that are no longer pending and removes them from the queue', async () => {
-    driverQueue.addTripToDriver(93, 897);
-    backendApi.fetchTripStatus.mockResolvedValue(TRIP_STATUS.ACCEPTED);
+  describe('driver recovery', () => {
+    it('re-emits INCOMING_TRIP with a fresh 30s timer when driver reconnects', async () => {
+      driverQueue.addTripToDriver(93, 901);
 
-    await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
+      await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
 
-    expect(driverQueue.hasTripInQueue(93, 897)).toBe(false);
-    expect(emit).not.toHaveBeenCalled();
-  });
+      expect(backendApi.fetchTripStatus).toHaveBeenCalledWith(901);
+      expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 901,
+        screenTimeout: 30,
+      });
+      expect(service.hasOfferSentOnSocket('socket-93', 901)).toBe(true);
+    });
 
-  it('does not duplicate INCOMING_TRIP on the same socket connection', async () => {
-    driverQueue.addTripToDriver(93, 901);
+    it('does not duplicate INCOMING_TRIP on the same socket connection', async () => {
+      driverQueue.addTripToDriver(93, 901);
 
-    await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
-    await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
+      await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
+      await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
 
-    expect(emit).toHaveBeenCalledTimes(1);
-  });
+      expect(emit).toHaveBeenCalledTimes(1);
+    });
 
-  it('preserves the driver queue during grace cleanup', () => {
-    driverQueue.addTripToDriver(93, 901);
-    driverState.setReconnecting(93);
+    it('preserves the driver queue during grace cleanup', () => {
+      driverQueue.addTripToDriver(93, 901);
+      driverState.setReconnecting(93);
 
-    service.cleanupDriver(93);
+      service.cleanupDriver(93);
 
-    expect(driverQueue.getQueueSize(93)).toBe(1);
+      expect(driverQueue.getQueueSize(93)).toBe(1);
+    });
   });
 });

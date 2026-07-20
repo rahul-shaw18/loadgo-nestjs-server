@@ -26,6 +26,7 @@ import { SocketRegistrationService } from '../services/socket-registration.servi
 import { DriverDisconnectTrackerService } from '../services/driver-disconnect-tracker.service';
 import { PendingTerminalService } from '../services/pending-terminal.service';
 import { TripAcceptanceCacheService } from '../services/trip-acceptance-cache.service';
+import { TripRequestTimeoutService } from '../services/trip-request-timeout.service';
 import { EVENTS } from '../../config/events.constant';
 import {
   LOCATION_UPDATE_THROTTLE_MS,
@@ -78,6 +79,7 @@ export class TripsGateway
     private readonly disconnectTracker: DriverDisconnectTrackerService,
     private readonly pendingTerminal: PendingTerminalService,
     private readonly acceptanceCache: TripAcceptanceCacheService,
+    private readonly tripRequestTimeout: TripRequestTimeoutService,
   ) {}
 
   afterInit(server: Server) {
@@ -710,6 +712,13 @@ export class TripsGateway
       return { ok: false, message: 'Invalid tripId' };
     }
 
+    if (this.tripRequestTimeout.isTerminal(normalizedTripId)) {
+      this.logger.log(
+        `[accept] Ignoring TRIP_ACCEPTED for trip ${normalizedTripId} — trip request timed out`,
+      );
+      return { ok: true, duplicate: true, tripId: normalizedTripId };
+    }
+
     const result = this.offerManager.handleAccept(driverId, normalizedTripId);
     if (!result.valid) {
       this.offerManager.clearOffer(driverId);
@@ -1004,7 +1013,7 @@ export class TripsGateway
 
     const offer = this.offerManager.getOffer(driverId);
     if (offer && tripIdsEqual(offer.tripId, normalizedTripId)) {
-      this.offerManager.handleReject(this.server, driverId);
+      this.offerManager.handleReject(this.server, driverId, normalizedTripId);
     } else if (this.driverState.canReceiveOffers(driverId)) {
       this.offerManager.offerNextTrip(this.server, driverId);
     }
