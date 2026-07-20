@@ -17,6 +17,7 @@ import { DriverDisconnectTrackerService } from './services/driver-disconnect-tra
 import { PendingTerminalService } from './services/pending-terminal.service';
 import { TripLifecycleLockService } from './services/trip-lifecycle-lock.service';
 import { TripAcceptanceCacheService } from './services/trip-acceptance-cache.service';
+import { TripRequestTimeoutService } from './services/trip-request-timeout.service';
 
 @Module({
   controllers: [TripsController],
@@ -38,6 +39,7 @@ import { TripAcceptanceCacheService } from './services/trip-acceptance-cache.ser
     PendingTerminalService,
     TripLifecycleLockService,
     TripAcceptanceCacheService,
+    TripRequestTimeoutService,
   ],
 })
 export class TripsModule {}

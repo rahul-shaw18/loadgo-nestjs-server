@@ -10,6 +10,7 @@ import { TripLifecycleLockService } from './trip-lifecycle-lock.service';
 import { PendingTerminalService } from './pending-terminal.service';
 import { DriverDisconnectTrackerService } from './driver-disconnect-tracker.service';
 import { TripAcceptanceCacheService } from './trip-acceptance-cache.service';
+import { TripRequestTimeoutService } from './trip-request-timeout.service';
 import { TRIP_STATUS } from '../../config/app.config';
 import { EVENTS } from '../../config/events.constant';
 
@@ -72,6 +73,9 @@ describe('TripLifecycleService', () => {
       {
         clearAllForTrip: jest.fn(),
       } as unknown as import('./trip-rejection-cooldown.service').TripRejectionCooldownService,
+      {
+        isTerminal: jest.fn().mockReturnValue(false),
+      } as unknown as TripRequestTimeoutService,
     );
   });
 

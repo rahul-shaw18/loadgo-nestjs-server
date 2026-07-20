@@ -8,6 +8,7 @@ export const EVENTS = {
   // ─── Server → Driver (socket) ──────────────────────────────────────────────
   INCOMING_TRIP: 'INCOMING_TRIP',
   INCOMING_TRIP_EXPIRED: 'INCOMING_TRIP_EXPIRED',
+  TRIP_REQUEST_TIMEOUT: 'TRIP_REQUEST_TIMEOUT',
 
   // ─── User ↔ Server (socket) ────────────────────────────────────────────────
   REGISTER_USER: 'REGISTER_USER',

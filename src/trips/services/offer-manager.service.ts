@@ -6,22 +6,17 @@ import {
   TRIP_STATUS,
 } from '../../config/app.config';
 import { EVENTS } from '../../config/events.constant';
-import { DriverQueueService } from './driver-queue.service';
+import { DriverQueueService, QueueEntry } from './driver-queue.service';
 import { ConnectionManagerService } from './connection-manager.service';
 import { DriverStateService } from './driver-state.service';
 import { TripRejectionCooldownService } from './trip-rejection-cooldown.service';
 import { BackendApiService } from './backend-api.service';
+import { TripEventEmitterService } from './trip-event-emitter.service';
 import { TripId, tripIdKey, tripIdsEqual } from '../utils/trip-id.util';
 
 interface ActiveOffer {
   tripId: TripId;
   screenTimerId: NodeJS.Timeout;
-}
-
-interface QueueEntry {
-  tripId: TripId;
-  addedAt: number;
-  bgExpireAt: number;
 }
 
 const OFFER_INELIGIBLE_REASONS: Record<number, string> = {
@@ -47,32 +42,8 @@ export class OfferManagerService {
     private readonly driverState: DriverStateService,
     private readonly rejectionCooldown: TripRejectionCooldownService,
     private readonly backendApi: BackendApiService,
+    private readonly tripEventEmitter: TripEventEmitterService,
   ) {}
-
-  private getNextEligibleTrip(driverId: string): QueueEntry | null {
-    const id = String(driverId);
-    let attempts = 0;
-    const maxAttempts = this.driverQueue.getQueueSize(id) + 1;
-
-    while (attempts < maxAttempts) {
-      attempts += 1;
-      const nextTrip = this.driverQueue.getNextTrip(id);
-      if (!nextTrip) {
-        return null;
-      }
-
-      if (!this.rejectionCooldown.isHidden(id, nextTrip.tripId)) {
-        return nextTrip;
-      }
-
-      this.logger.debug(
-        `Skipping trip ${nextTrip.tripId} for driver ${id} — rejection cooldown active`,
-      );
-      this.driverQueue.rotateCurrentTrip(id);
-    }
-
-    return null;
-  }
 
   private describeIneligibleTrip(status: number | null): string {
     if (status === null) {
@@ -116,7 +87,6 @@ export class OfferManagerService {
     const bgTimeLeft = queueEntry.bgExpireAt - now;
 
     if (bgTimeLeft <= 0) {
-      this.driverQueue.rotateCurrentTrip(driverId);
       return false;
     }
 
@@ -132,7 +102,7 @@ export class OfferManagerService {
     this.clearOffer(driverId);
 
     const screenTimerId = setTimeout(() => {
-      this.onScreenTimeout(io, driverId);
+      void this.onScreenTimeout(io, driverId);
     }, effectiveScreenMs);
 
     this.activeOffers[driverId] = {
@@ -152,38 +122,100 @@ export class OfferManagerService {
     );
     io.to(socketId).emit(EVENTS.INCOMING_TRIP, payload);
 
-    this.logger.log(
-      `Offered trip ${queueEntry.tripId} to driver ${driverId} ` +
-        `(screen: ${Math.ceil(effectiveScreenMs / 1000)}s, ` +
-        `bg left: ${Math.ceil(bgTimeLeft / 1000)}s, ` +
-        `queue size: ${this.driverQueue.getQueueSize(driverId)})`,
+    this.driverQueue.logQueueState(
+      driverId,
+      `Active offer → Trip ${queueEntry.tripId} (screen: ${Math.ceil(effectiveScreenMs / 1000)}s)`,
     );
 
     return true;
   }
 
-  offerNextTrip(io: Server, driverId: string | number) {
+  /**
+   * Walks the driver's queue sequentially, skipping invalid entries,
+   * and presents exactly one INCOMING_TRIP when a valid candidate is found.
+   */
+  async advanceToNextOffer(
+    io: Server,
+    driverId: string | number,
+    trigger: string,
+  ): Promise<void> {
     const id = String(driverId);
 
     if (!this.driverState.canReceiveOffers(id)) {
       this.logger.debug(
-        `Driver ${id} is on an active trip — skipping new offers`,
+        `[DriverQueue] Driver ${id} — ${trigger}: cannot receive offers`,
       );
       return;
     }
 
     if (this.activeOffers[id]) {
-      this.logger.debug(`Driver ${id} already has an active offer, skipping`);
+      this.logger.debug(
+        `[DriverQueue] Driver ${id} — ${trigger}: active offer already showing`,
+      );
       return;
     }
 
-    const nextTrip = this.getNextEligibleTrip(id);
-    if (!nextTrip) {
-      this.logger.debug(`No trips in queue for driver ${id}`);
-      return;
+    const maxAttempts = this.driverQueue.getQueueSize(id) + 1;
+    let attempts = 0;
+
+    while (attempts < maxAttempts) {
+      attempts += 1;
+
+      const nextTrip = this.driverQueue.getNextTrip(id);
+      if (!nextTrip) {
+        this.driverQueue.logQueueState(id, `${trigger}: queue empty`);
+        return;
+      }
+
+      if (nextTrip.bgExpireAt <= Date.now()) {
+        this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
+        this.logger.log(
+          `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId} skipped (background timer expired)\n\nQueue:\n${this.driverQueue.getQueueTripIds(id).join('\n') || '(empty)'}`,
+        );
+        continue;
+      }
+
+      if (this.rejectionCooldown.isHidden(id, nextTrip.tripId)) {
+        this.driverQueue.deferFrontTrip(id);
+        continue;
+      }
+
+      const validation = await this.validateTripForOffer(nextTrip.tripId);
+      if (!validation.ok) {
+        this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
+        const nextIds = this.driverQueue.getQueueTripIds(id);
+        this.logger.log(
+          `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId} ${validation.reason}\n\nRemoving...\n\nNext Trip:\n${nextIds[0] ?? '(none)'}`,
+        );
+        continue;
+      }
+
+      const socketId = this.connectionManager.getDriverSocketId(id);
+      if (!socketId) {
+        this.logger.debug(
+          `[DriverQueue] Driver ${id} — ${trigger}: offline, queue preserved`,
+        );
+        return;
+      }
+
+      if (this.emitIncomingTrip(io, id, nextTrip, { socketId })) {
+        return;
+      }
+
+      this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
     }
 
-    this.emitIncomingTrip(io, id, nextTrip);
+    this.driverQueue.logQueueState(id, `${trigger}: no valid offers remaining`);
+  }
+
+  offerNextTrip(io: Server, driverId: string | number): void {
+    void this.advanceToNextOffer(io, driverId, 'offer-next');
+  }
+
+  scheduleNextOffer(io: Server, driverId: string | number, trigger: string): void {
+    setTimeout(() => {
+      void this.advanceToNextOffer(io, driverId, trigger);
+    }, ROTATION_GAP_MS);
   }
 
   async recoverPendingOffersOnRegister(
@@ -201,88 +233,36 @@ export class OfferManagerService {
       return;
     }
 
-    this.logger.log(`[driver-recovery] Checking pending offers...`);
-    const queue = this.driverQueue.getQueue(id);
-
-    if (queue.length === 0) {
+    const queueSize = this.driverQueue.getQueueSize(id);
+    if (queueSize === 0) {
       this.logger.log(`[driver-recovery] No queued offers`);
       this.logger.log(`[driver-recovery] Recovery complete`);
       return;
     }
 
     this.logger.log(
-      `[driver-recovery] Found ${queue.length} queued offer(s)`,
+      `[driver-recovery] Found ${queueSize} queued offer(s)`,
     );
+    this.driverQueue.logQueueState(id, 'Reconnect — restoring queue');
 
-    for (const entry of [...queue]) {
-      if (entry.bgExpireAt <= Date.now()) {
-        this.driverQueue.removeTripFromDriver(id, entry.tripId);
-        this.logger.log(
-          `[driver-recovery] Trip ${entry.tripId} skipped (background timer expired)`,
-        );
-        continue;
-      }
-
-      if (!this.driverQueue.hasTripInQueue(id, entry.tripId)) {
-        continue;
-      }
-
-      const validation = await this.validateTripForOffer(entry.tripId);
-      if (!validation.ok) {
-        this.driverQueue.removeTripFromDriver(id, entry.tripId);
-        this.logger.log(
-          `[driver-recovery] Trip ${entry.tripId} skipped (${validation.reason})`,
-        );
-        continue;
-      }
-
-      const bgLeftSec = Math.ceil((entry.bgExpireAt - Date.now()) / 1000);
+    const nextTrip = this.driverQueue.getNextTrip(id);
+    if (
+      nextTrip &&
+      this.hasOfferSentOnSocket(socketId, nextTrip.tripId) &&
+      this.activeOffers[id]
+    ) {
       this.logger.log(
-        `[driver-recovery] Trip ${entry.tripId} still active (${bgLeftSec}s background remaining)`,
-      );
-    }
-
-    if (this.driverQueue.getQueueSize(id) === 0) {
-      this.logger.log(`[driver-recovery] Recovery complete`);
-      return;
-    }
-
-    const nextTrip = this.getNextEligibleTrip(id);
-    if (!nextTrip) {
-      this.logger.log(`[driver-recovery] Recovery complete`);
-      return;
-    }
-
-    if (this.hasOfferSentOnSocket(socketId, nextTrip.tripId)) {
-      this.logger.log(
-        `[driver-recovery] Trip ${nextTrip.tripId} already sent on this connection — skipping`,
+        `[driver-recovery] Trip ${nextTrip.tripId} already active on this connection — skipping`,
       );
       this.logger.log(`[driver-recovery] Recovery complete`);
       return;
     }
 
-    const validation = await this.validateTripForOffer(nextTrip.tripId);
-    if (!validation.ok) {
-      this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
-      this.logger.log(
-        `[driver-recovery] Trip ${nextTrip.tripId} skipped (${validation.reason})`,
-      );
-      this.logger.log(`[driver-recovery] Recovery complete`);
-      return;
-    }
-
-    const emitted = this.emitIncomingTrip(io, id, nextTrip, { socketId });
-
-    if (emitted) {
-      this.logger.log(
-        `[driver-recovery] Re-emitting INCOMING_TRIP to driver ${id} for trip ${nextTrip.tripId}`,
-      );
-    }
-
+    await this.advanceToNextOffer(io, id, 'reconnect-recovery');
     this.logger.log(`[driver-recovery] Recovery complete`);
   }
 
-  private onScreenTimeout(io: Server, driverId: string | number) {
+  private async onScreenTimeout(io: Server, driverId: string | number) {
     const id = String(driverId);
     const offer = this.activeOffers[id];
     if (!offer) return;
@@ -301,21 +281,25 @@ export class OfferManagerService {
 
     const socketId = this.connectionManager.getDriverSocketId(id);
     if (socketId && this.driverState.canReceiveOffers(id)) {
-      this.logger.log(
-        `Emitting ${EVENTS.INCOMING_TRIP_EXPIRED} to driver ${id} (socket ${socketId}): ${JSON.stringify({ tripId: offer.tripId })}`,
-      );
       io.to(socketId).emit(EVENTS.INCOMING_TRIP_EXPIRED, {
         tripId: offer.tripId,
       });
     }
 
+    this.tripEventEmitter.emitToTripRoom(
+      io,
+      offer.tripId,
+      EVENTS.TRIP_REQUEST_TIMEOUT,
+      { tripId: offer.tripId, driverId: id },
+      'offer-screen-timeout',
+      { driverId: id },
+    );
+
     delete this.activeOffers[id];
-    this.driverQueue.rotateCurrentTrip(id);
+    this.driverQueue.removeFrontTrip(id);
 
     if (this.driverState.canReceiveOffers(id)) {
-      setTimeout(() => {
-        this.offerNextTrip(io, id);
-      }, ROTATION_GAP_MS);
+      this.scheduleNextOffer(io, id, 'screen-timeout');
     }
   }
 
@@ -335,6 +319,12 @@ export class OfferManagerService {
 
   hasOffer(driverId: string | number): boolean {
     return !!this.activeOffers[String(driverId)];
+  }
+
+  getDriverIdsWithActiveOfferForTrip(tripId: TripId): string[] {
+    return Object.keys(this.activeOffers).filter((driverId) =>
+      tripIdsEqual(this.activeOffers[driverId].tripId, tripId),
+    );
   }
 
   clearAllOffersForTrip(
@@ -361,24 +351,30 @@ export class OfferManagerService {
       affectedDrivers.push(driverId);
     }
 
-    this.driverQueue.removeTripFromAllDrivers(tripId);
+    const queuedDrivers = this.driverQueue.removeTripFromAllDrivers(tripId);
 
-    if (affectedDrivers.length > 0) {
+    const driversToAdvance = new Set([...affectedDrivers, ...queuedDrivers]);
+
+    if (driversToAdvance.size > 0) {
       this.logger.log(
-        `Cleared offers for trip ${tripId} from ${affectedDrivers.length} driver(s)`,
+        `Cleared trip ${tripId} from ${driversToAdvance.size} driver(s) — advancing queues`,
       );
 
-      setTimeout(() => {
-        affectedDrivers.forEach((id) => {
-          if (this.driverState.canReceiveOffers(id)) {
-            this.offerNextTrip(io, id);
-          }
-        });
-      }, ROTATION_GAP_MS);
+      driversToAdvance.forEach((id) => {
+        if (
+          assigneeDriverId !== undefined &&
+          String(id) === String(assigneeDriverId)
+        ) {
+          return;
+        }
+        if (this.driverState.canReceiveOffers(id)) {
+          this.scheduleNextOffer(io, id, 'trip-taken-by-other');
+        }
+      });
     }
   }
 
-  handleReject(io: Server, driverId: string | number) {
+  handleReject(io: Server, driverId: string | number, tripId?: TripId) {
     const id = String(driverId);
 
     if (!this.driverState.canReceiveOffers(id)) {
@@ -390,15 +386,24 @@ export class OfferManagerService {
     }
 
     const offer = this.activeOffers[id];
-    if (!offer) return;
+    const rejectedTripId = tripId ?? offer?.tripId;
 
-    this.logger.log(`Driver ${id} rejected trip ${offer.tripId}`);
+    if (!rejectedTripId) {
+      return;
+    }
+
     this.clearOffer(id);
-    this.driverQueue.rotateCurrentTrip(id);
 
-    setTimeout(() => {
-      this.offerNextTrip(io, id);
-    }, ROTATION_GAP_MS);
+    if (this.driverQueue.hasTripInQueue(id, rejectedTripId)) {
+      this.driverQueue.removeTripFromDriver(id, rejectedTripId);
+    }
+
+    const nextTrip = this.driverQueue.getNextTrip(id);
+    this.logger.log(
+      `[DriverQueue] Driver ${id}\nRejected Trip ${rejectedTripId}\n\nNext Trip:\n${nextTrip?.tripId ?? '(none)'}`,
+    );
+
+    this.scheduleNextOffer(io, id, 'reject');
   }
 
   handleAccept(
@@ -420,6 +425,10 @@ export class OfferManagerService {
 
     this.logger.log(`Driver ${id} accepted trip ${tripId}`);
     this.clearOffer(id);
+    this.driverQueue.clearDriverQueue(
+      id,
+      `Accepted Trip ${tripId}\n\nClearing remaining queue`,
+    );
 
     return { valid: true, tripId };
   }
@@ -441,10 +450,11 @@ export class OfferManagerService {
   }
 
   onDriverDisconnect(driverId: string | number) {
-    this.clearOffer(driverId);
-    this.driverState.setReconnecting(driverId);
+    const id = String(driverId);
+    this.clearOffer(id);
+    this.driverState.setReconnecting(id);
     this.logger.log(
-      `Driver ${driverId} disconnected — offer timer cleared, queue preserved (size: ${this.driverQueue.getQueueSize(driverId)})`,
+      `Driver ${id} disconnected — offer timer cleared, queue preserved (size: ${this.driverQueue.getQueueSize(id)})`,
     );
   }
 

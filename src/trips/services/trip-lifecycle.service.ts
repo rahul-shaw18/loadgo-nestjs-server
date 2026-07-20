@@ -13,6 +13,7 @@ import { PendingTerminalService } from './pending-terminal.service';
 import { DriverDisconnectTrackerService } from './driver-disconnect-tracker.service';
 import { TripAcceptanceCacheService } from './trip-acceptance-cache.service';
 import { TripRejectionCooldownService } from './trip-rejection-cooldown.service';
+import { TripRequestTimeoutService } from './trip-request-timeout.service';
 import { EVENTS } from '../../config/events.constant';
 import { TripId } from '../utils/trip-id.util';
 
@@ -41,7 +42,18 @@ export class TripLifecycleService {
     private readonly disconnectTracker: DriverDisconnectTrackerService,
     private readonly acceptanceCache: TripAcceptanceCacheService,
     private readonly rejectionCooldown: TripRejectionCooldownService,
+    private readonly tripRequestTimeout: TripRequestTimeoutService,
   ) {}
+
+  private rejectIfTerminal(tripId: TripId, context: string): SocketAck | null {
+    if (!this.tripRequestTimeout.isTerminal(tripId)) {
+      return null;
+    }
+    this.logger.log(
+      `[${context}] Trip ${tripId} is terminal (status 8) — ignoring lifecycle event`,
+    );
+    return { ok: true, duplicate: true, tripId };
+  }
 
   validateDriverTripRoom(
     client: Socket,
@@ -147,6 +159,11 @@ export class TripLifecycleService {
       lng?: string;
     },
   ): Promise<SocketAck> {
+    const terminal = this.rejectIfTerminal(params.tripId, params.context);
+    if (terminal) {
+      return terminal;
+    }
+
     const roomError = this.validateDriverTripRoom(
       client,
       params.tripId,
@@ -258,6 +275,11 @@ export class TripLifecycleService {
       context: string;
     },
   ): Promise<SocketAck> {
+    const terminal = this.rejectIfTerminal(params.tripId, params.context);
+    if (terminal) {
+      return terminal;
+    }
+
     if (!this.lifecycleLock.tryAcquire(params.tripId)) {
       return { ok: false, message: 'Processing' };
     }
@@ -326,6 +348,11 @@ export class TripLifecycleService {
       reason?: string;
     },
   ): Promise<SocketAck> {
+    const terminal = this.rejectIfTerminal(params.tripId, params.context);
+    if (terminal) {
+      return terminal;
+    }
+
     const roomError = this.validateUserTripRoom(
       client,
       params.tripId,
