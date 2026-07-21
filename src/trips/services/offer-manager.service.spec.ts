@@ -134,6 +134,76 @@ describe('OfferManagerService', () => {
         screenTimeout: 30,
       });
     });
+
+    it('still offers a trip when status lookup returns unknown/null instead of removing it', async () => {
+      driverQueue.addTripToDriver(93, 1046);
+      driverQueue.addTripToDriver(93, 1047);
+      backendApi.fetchTripStatus.mockResolvedValue(null);
+
+      await service.advanceToNextOffer(io, 93, 'reject');
+
+      expect(driverQueue.hasTripInQueue(93, 1046)).toBe(true);
+      expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 1046,
+        screenTimeout: 30,
+      });
+    });
+
+    it('continues past known-invalid trips and offers the first valid one', async () => {
+      driverQueue.addTripToDriver(93, 1046);
+      driverQueue.addTripToDriver(93, 1047);
+      driverQueue.addTripToDriver(93, 1048);
+
+      backendApi.fetchTripStatus.mockImplementation(async (tripId) => {
+        if (tripId === 1046) return null;
+        if (tripId === 1047) return TRIP_STATUS.ACCEPTED;
+        return TRIP_STATUS.REQUESTED;
+      });
+
+      await service.advanceToNextOffer(io, 93, 'test');
+
+      // null status keeps 1046 and offers it optimistically
+      expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 1046,
+        screenTimeout: 30,
+      });
+      expect(driverQueue.hasTripInQueue(93, 1046)).toBe(true);
+    });
+
+    it('skips accepted trips then offers the next after reject-style advance', async () => {
+      driverQueue.addTripToDriver(93, 1046);
+      driverQueue.addTripToDriver(93, 1047);
+
+      backendApi.fetchTripStatus.mockImplementation(async (tripId) => {
+        if (tripId === 1046) return TRIP_STATUS.COMPLETED;
+        return TRIP_STATUS.REQUESTED;
+      });
+
+      await service.advanceToNextOffer(io, 93, 'reject');
+
+      expect(driverQueue.hasTripInQueue(93, 1046)).toBe(false);
+      expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 1047,
+        screenTimeout: 30,
+      });
+    });
+
+    it('continues queue processing when validation throws for one trip', async () => {
+      driverQueue.addTripToDriver(93, 1046);
+      driverQueue.addTripToDriver(93, 1047);
+
+      backendApi.fetchTripStatus
+        .mockRejectedValueOnce(new Error('network down'))
+        .mockResolvedValue(TRIP_STATUS.REQUESTED);
+
+      await service.advanceToNextOffer(io, 93, 'test');
+
+      // thrown validation is treated as optimistic offer for 1046
+      expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
+        tripId: 1046,
+        screenTimeout: 30,
+      });
+    });
   });
 
   describe('driver recovery', () => {

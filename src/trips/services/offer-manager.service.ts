@@ -29,6 +29,20 @@ const OFFER_INELIGIBLE_REASONS: Record<number, string> = {
   8: 'expired',
 };
 
+const TERMINAL_OFFER_STATUSES = new Set([
+  TRIP_STATUS.ACCEPTED,
+  3, // REVOKED
+  TRIP_STATUS.STARTED,
+  TRIP_STATUS.COMPLETED,
+  TRIP_STATUS.CANCELLED_BY_USER,
+  TRIP_STATUS.CANCELLED_BY_DRIVER,
+  TRIP_STATUS.REQUEST_TIMEOUT,
+]);
+
+type TripOfferValidation =
+  | { ok: true; reason?: string }
+  | { ok: false; reason: string; remove: boolean };
+
 @Injectable()
 export class OfferManagerService {
   private readonly logger = new Logger(OfferManagerService.name);
@@ -45,21 +59,61 @@ export class OfferManagerService {
     private readonly tripEventEmitter: TripEventEmitterService,
   ) {}
 
-  private describeIneligibleTrip(status: number | null): string {
-    if (status === null) {
-      return 'trip not found';
-    }
+  private describeIneligibleTrip(status: number): string {
     return OFFER_INELIGIBLE_REASONS[status] ?? `status ${status}`;
   }
 
+  /**
+   * Validates whether a queued trip can still be offered.
+   * - status 1 (REQUESTED) → offer
+   * - known terminal statuses → remove and skip
+   * - null/unknown (lookup failure) → still offer (trip was queued by notify-new-trip)
+   */
   private async validateTripForOffer(
     tripId: TripId,
-  ): Promise<{ ok: true } | { ok: false; reason: string }> {
-    const status = await this.backendApi.fetchTripStatus(tripId);
-    if (status === TRIP_STATUS.REQUESTED) {
-      return { ok: true };
+  ): Promise<TripOfferValidation> {
+    try {
+      const status = await this.backendApi.fetchTripStatus(tripId);
+
+      if (status === TRIP_STATUS.REQUESTED) {
+        return { ok: true };
+      }
+
+      if (status === null) {
+        this.logger.warn(
+          `[DriverQueue] Trip ${tripId} status unknown — keeping in queue and offering (lookup failed or unparseable)`,
+        );
+        return {
+          ok: true,
+          reason: 'status unknown — offering optimistically',
+        };
+      }
+
+      if (TERMINAL_OFFER_STATUSES.has(status)) {
+        return {
+          ok: false,
+          reason: this.describeIneligibleTrip(status),
+          remove: true,
+        };
+      }
+
+      // Unexpected non-terminal status — do not destroy the queue entry.
+      this.logger.warn(
+        `[DriverQueue] Trip ${tripId} has unexpected status ${status} — keeping in queue and offering`,
+      );
+      return {
+        ok: true,
+        reason: `unexpected status ${status} — offering`,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `[DriverQueue] Trip ${tripId} validation threw: ${(error as Error).message} — keeping in queue and offering`,
+      );
+      return {
+        ok: true,
+        reason: 'validation error — offering optimistically',
+      };
     }
-    return { ok: false, reason: this.describeIneligibleTrip(status) };
   }
 
   private markOfferSentOnSocket(socketId: string, tripId: TripId): void {
@@ -131,8 +185,9 @@ export class OfferManagerService {
   }
 
   /**
-   * Walks the driver's queue sequentially, skipping invalid entries,
+   * Walks the driver's queue sequentially, skipping only known-invalid entries,
    * and presents exactly one INCOMING_TRIP when a valid candidate is found.
+   * One failed lookup or invalid trip must never abandon the rest of the queue.
    */
   async advanceToNextOffer(
     io: Server,
@@ -155,54 +210,99 @@ export class OfferManagerService {
       return;
     }
 
-    const maxAttempts = this.driverQueue.getQueueSize(id) + 1;
+    const initialQueue = this.driverQueue.getQueueTripIds(id);
+    this.logger.log(
+      `[DriverQueue]\nProcessing queue for Driver ${id} (${trigger})\n\nCurrent queue:\n${initialQueue.join('\n') || '(empty)'}`,
+    );
+
+    // Bound iterations by initial size + a small buffer so deferrals cannot spin forever.
+    const maxAttempts = Math.max(initialQueue.length * 2, 1);
     let attempts = 0;
 
     while (attempts < maxAttempts) {
       attempts += 1;
 
-      const nextTrip = this.driverQueue.getNextTrip(id);
-      if (!nextTrip) {
-        this.driverQueue.logQueueState(id, `${trigger}: queue empty`);
-        return;
-      }
+      try {
+        const nextTrip = this.driverQueue.getNextTrip(id);
+        if (!nextTrip) {
+          this.driverQueue.logQueueState(id, `${trigger}: queue empty`);
+          return;
+        }
 
-      if (nextTrip.bgExpireAt <= Date.now()) {
-        this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
         this.logger.log(
-          `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId} skipped (background timer expired)\n\nQueue:\n${this.driverQueue.getQueueTripIds(id).join('\n') || '(empty)'}`,
+          `[DriverQueue] Driver ${id}\nProcessing next trip...\nTrip ${nextTrip.tripId}`,
         );
-        continue;
-      }
 
-      if (this.rejectionCooldown.isHidden(id, nextTrip.tripId)) {
-        this.driverQueue.deferFrontTrip(id);
-        continue;
-      }
+        if (nextTrip.bgExpireAt <= Date.now()) {
+          this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
+          this.logger.log(
+            `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId}\nBackground timer expired\n\nRemoving from queue...`,
+          );
+          continue;
+        }
 
-      const validation = await this.validateTripForOffer(nextTrip.tripId);
-      if (!validation.ok) {
-        this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
-        const nextIds = this.driverQueue.getQueueTripIds(id);
+        if (this.rejectionCooldown.isHidden(id, nextTrip.tripId)) {
+          this.logger.log(
+            `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId}\nRejection cooldown active — deferring`,
+          );
+          this.driverQueue.deferFrontTrip(id);
+          continue;
+        }
+
+        const validation = await this.validateTripForOffer(nextTrip.tripId);
+        if (!validation.ok) {
+          if (validation.remove) {
+            this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
+            const nextIds = this.driverQueue.getQueueTripIds(id);
+            this.logger.log(
+              `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId}\n${validation.reason}\n\nRemoving from queue...\n\nNext Trip:\n${nextIds[0] ?? '(none)'}`,
+            );
+          } else {
+            this.logger.log(
+              `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId}\n${validation.reason} — deferring`,
+            );
+            this.driverQueue.deferFrontTrip(id);
+          }
+          continue;
+        }
+
+        if (validation.reason) {
+          this.logger.log(
+            `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId}\n${validation.reason}`,
+          );
+        }
+
+        const socketId = this.connectionManager.getDriverSocketId(id);
+        if (!socketId) {
+          this.logger.debug(
+            `[DriverQueue] Driver ${id} — ${trigger}: offline, queue preserved`,
+          );
+          return;
+        }
+
         this.logger.log(
-          `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId} ${validation.reason}\n\nRemoving...\n\nNext Trip:\n${nextIds[0] ?? '(none)'}`,
+          `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId}\nValid\n\nCreating active offer...\nStarting timer...\nEmitting ${EVENTS.INCOMING_TRIP}`,
         );
-        continue;
-      }
 
-      const socketId = this.connectionManager.getDriverSocketId(id);
-      if (!socketId) {
-        this.logger.debug(
-          `[DriverQueue] Driver ${id} — ${trigger}: offline, queue preserved`,
+        if (this.emitIncomingTrip(io, id, nextTrip, { socketId })) {
+          return;
+        }
+
+        this.logger.warn(
+          `[DriverQueue] Driver ${id}\nTrip ${nextTrip.tripId} emit failed — removing and continuing`,
         );
-        return;
+        this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
+      } catch (error) {
+        this.logger.error(
+          `[DriverQueue] Driver ${id} — error while processing queue entry: ${(error as Error).message}`,
+          (error as Error).stack,
+        );
+        // Skip the front entry so one bad trip cannot stall the whole queue.
+        const stuck = this.driverQueue.getNextTrip(id);
+        if (stuck) {
+          this.driverQueue.deferFrontTrip(id);
+        }
       }
-
-      if (this.emitIncomingTrip(io, id, nextTrip, { socketId })) {
-        return;
-      }
-
-      this.driverQueue.removeTripFromDriver(id, nextTrip.tripId);
     }
 
     this.driverQueue.logQueueState(id, `${trigger}: no valid offers remaining`);
