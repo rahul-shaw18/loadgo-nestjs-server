@@ -381,7 +381,10 @@ export class BackendApiService {
     }
 
     const status = extractTripStatus(result.data, tripId);
-    this.writeCache(this.tripStatusCache, cacheKey, status);
+    // Never cache null — a parse/lookup miss must not permanently block offers.
+    if (status !== null) {
+      this.writeCache(this.tripStatusCache, cacheKey, status);
+    }
     this.logger.log(
       `[backend] getLiveTripData (${param}) → status ${status ?? 'unknown'}`,
     );

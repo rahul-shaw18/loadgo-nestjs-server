@@ -38,11 +38,34 @@ export function parseTripStatus(record: Record<string, unknown>): number | null 
     }
 
     const label = String(raw).toLowerCase();
+    if (
+      label === 'requested' ||
+      label === 'pending' ||
+      label === 'searching' ||
+      label.includes('search')
+    ) {
+      return 1;
+    }
     if (label === 'accepted' || label.includes('assigned')) {
       return 2;
     }
+    if (label === 'revoked' || label === 'cancelled_timeout') {
+      return 3;
+    }
     if (label === 'started' || label.includes('in progress')) {
       return 4;
+    }
+    if (label === 'completed' || label === 'complete') {
+      return 5;
+    }
+    if (label.includes('cancel') && label.includes('user')) {
+      return 6;
+    }
+    if (label.includes('cancel') && label.includes('driver')) {
+      return 7;
+    }
+    if (label.includes('timeout') || label.includes('expired')) {
+      return 8;
     }
   }
 
