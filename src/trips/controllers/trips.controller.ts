@@ -232,6 +232,7 @@ export class TripsController {
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
           this.acceptanceCache.clear(tripId);
+          this.rejectionCooldown.clearAllForTrip(tripId);
           this.tripEventEmitter.emitGlobally(
             io,
             EVENTS.TRIP_REVOKED,
@@ -241,6 +242,7 @@ export class TripsController {
           break;
         }
         case STATUS.STARTED: {
+          this.rejectionCooldown.clearAllForTrip(tripId);
           this.tripEventEmitter.emitToTripRoom(
             io,
             tripId,
@@ -272,19 +274,12 @@ export class TripsController {
           }
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
-          this.tripEventEmitter.emitToTripRoom(
+          this.tripEventEmitter.emitTripCancelledByUser(
             io,
             tripId,
-            EVENTS.TRIP_CANCELLED_BY_USER,
-            { tripId },
+            { tripId, ...(userId !== undefined && { userId }) },
             'trip-status-update:CANCELLED_BY_USER',
             { driverId, userId },
-          );
-          this.tripEventEmitter.emitGlobally(
-            io,
-            EVENTS.TRIP_CANCELLED_BY_USER,
-            { tripId },
-            'trip-status-update:CANCELLED_BY_USER',
           );
           this.clearTripTrackingState(tripId);
           break;

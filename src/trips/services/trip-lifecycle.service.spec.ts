@@ -58,6 +58,7 @@ describe('TripLifecycleService', () => {
       offerManager as unknown as OfferManagerService,
       {
         emitToTripRoom: jest.fn(),
+        emitTripCancelledByUser: jest.fn(),
         getRoomDebugInfo: jest.fn().mockReturnValue('room-debug'),
       } as unknown as TripEventEmitterService,
       backendApi as unknown as BackendApiService,

@@ -137,7 +137,15 @@ export class TripEventEmitterService {
     assigneeDriverId: string | number,
     context: string,
   ): void {
-    const payload = { driverId: assigneeDriverId, tripId };
+    const payload = {
+      tripId,
+      driverId: assigneeDriverId,
+      message: 'Trip accepted by another driver.',
+    };
+
+    this.logger.log(
+      `[TripEvent]\n\nEmitting ${EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER}\n\nTrip:\n${tripIdKey(tripId)}\n\nAssignee driver:\n${assigneeDriverId}`,
+    );
 
     for (const driverId of this.connectionManager.getAllDriverIds()) {
       if (String(driverId) === String(assigneeDriverId)) {
@@ -152,6 +160,35 @@ export class TripEventEmitterService {
         context,
       );
     }
+  }
+
+  emitTripCancelledByUser(
+    io: Server,
+    tripId: TripId,
+    payload: Record<string, unknown>,
+    context: string,
+    options?: { driverId?: string | number; userId?: string | number },
+  ): void {
+    const enriched = {
+      message: 'Trip cancelled by user.',
+      ...payload,
+      tripId,
+    };
+
+    this.logger.log(
+      `[TripEvent]\n\nEmitting ${EVENTS.TRIP_CANCELLED_BY_USER}\n\nTrip:\n${tripIdKey(tripId)}\n\nPayload:\n${JSON.stringify(enriched)}`,
+    );
+
+    this.emitToTripRoom(
+      io,
+      tripId,
+      EVENTS.TRIP_CANCELLED_BY_USER,
+      enriched,
+      context,
+      options,
+    );
+
+    this.emitGlobally(io, EVENTS.TRIP_CANCELLED_BY_USER, enriched, context);
   }
 
   emitGlobally(
