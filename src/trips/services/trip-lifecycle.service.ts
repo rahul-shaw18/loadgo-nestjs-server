@@ -123,6 +123,7 @@ export class TripLifecycleService {
       this.disconnectTracker.clearDisconnectFlag(assigneeDriverId);
     }
 
+    this.rejectionCooldown.clearAllForTrip(tripId);
     this.acceptanceCache.clear(tripId);
     this.cleanupTerminalTrip(io, tripId);
   }
@@ -402,14 +403,24 @@ export class TripLifecycleService {
         this.driverState.findDriverOnTrip(params.tripId) ??
         undefined;
 
-      this.tripEventEmitter.emitToTripRoom(
-        io,
-        params.tripId,
-        params.event,
-        params.broadcastPayload,
-        params.context,
-        { userId: params.userId, driverId: assigneeDriverId },
-      );
+      if (params.event === EVENTS.TRIP_CANCELLED_BY_USER) {
+        this.tripEventEmitter.emitTripCancelledByUser(
+          io,
+          params.tripId,
+          params.broadcastPayload,
+          params.context,
+          { userId: params.userId, driverId: assigneeDriverId },
+        );
+      } else {
+        this.tripEventEmitter.emitToTripRoom(
+          io,
+          params.tripId,
+          params.event,
+          params.broadcastPayload,
+          params.context,
+          { userId: params.userId, driverId: assigneeDriverId },
+        );
+      }
 
       this.offerManager.clearAllOffersForTrip(
         io,

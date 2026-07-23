@@ -1086,6 +1086,7 @@ export class TripsGateway
         broadcastPayload: {
           tripId,
           userId,
+          message: 'Trip cancelled by user.',
           ...(payload.reason !== undefined && { reason: payload.reason }),
           ...(payload.tag !== undefined && { tag: payload.tag }),
         },

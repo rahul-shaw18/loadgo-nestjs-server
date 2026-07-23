@@ -12,7 +12,28 @@ export const BACKGROUND_TIMER_MS = 5 * 60 * 1000; // 5 minutes — total lifetim
 export const ROTATION_GAP_MS = 5 * 1000; // 5 seconds — gap between trip rotations
 export const LOCATION_UPDATE_THROTTLE_MS = 1000; // 1 second — max location broadcasts per driver
 export const DISCONNECT_GRACE_MS = 30 * 1000; // 30 seconds — grace before driver queue cleanup
-export const REJECTION_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes — hide rejected trip from driver
+/** @deprecated Prefer gradual rejection cooldown helpers below */
+export const REJECTION_COOLDOWN_MS = 30 * 1000;
+/** First rejection of a trip hides it for this long */
+export const REJECTION_COOLDOWN_INITIAL_MS = 30 * 1000;
+/**
+ * After the 2nd rejection, each further rejection adds this step.
+ * Progression: 30s → 60s → 110s → 160s → 210s …
+ */
+export const REJECTION_COOLDOWN_SECOND_MS = 60 * 1000;
+export const REJECTION_COOLDOWN_STEP_MS = 50 * 1000;
+
+/** Gradual per-driver-per-trip rejection cooldown in milliseconds */
+export function rejectionCooldownMsForCount(rejectionCount: number): number {
+  const count = Math.max(1, Math.floor(rejectionCount));
+  if (count === 1) {
+    return REJECTION_COOLDOWN_INITIAL_MS;
+  }
+  if (count === 2) {
+    return REJECTION_COOLDOWN_SECOND_MS;
+  }
+  return REJECTION_COOLDOWN_SECOND_MS + (count - 2) * REJECTION_COOLDOWN_STEP_MS;
+}
 export const TRIP_LOOKUP_CACHE_TTL_MS = 8 * 1000; // collapse burst getLiveTripData calls
 export const PENDING_TERMINAL_COOLDOWN_MS = 30 * 1000; // block stale restore after failed complete
 export const DRIVER_RECONNECT_WINDOW_MS = 5 * 60 * 1000; // emit DRIVER_RECONNECTED window
