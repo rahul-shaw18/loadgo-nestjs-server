@@ -8,6 +8,8 @@ export interface QueueEntry {
   bgExpireAt: number;
 }
 
+export type QueueTripResult = 'added' | 'exists';
+
 @Injectable()
 export class DriverQueueService {
   private readonly logger = new Logger(DriverQueueService.name);
@@ -57,17 +59,24 @@ export class DriverQueueService {
     return (this.driverQueues[id] ?? []).map((entry) => entry.tripId);
   }
 
-  addTripToDriver(driverId: string | number, tripId: TripId): boolean {
+  /**
+   * Ensures the trip is in the driver's queue exactly once.
+   * If already present, leaves the existing entry untouched (no timer changes).
+   */
+  ensureTripInQueue(
+    driverId: string | number,
+    tripId: TripId,
+  ): QueueTripResult {
     const id = String(driverId);
     if (!this.driverQueues[id]) {
       this.driverQueues[id] = [];
     }
 
     if (this.driverQueues[id].some((entry) => tripIdsEqual(entry.tripId, tripId))) {
-      this.logger.debug(
-        `[DriverQueue] Driver ${id} — trip ${tripId} already queued, skipping duplicate`,
+      this.logger.log(
+        `[DriverQueue] Driver ${id}\nTrip already queued\n\nLeaving existing entry unchanged\nTrip: ${tripId}`,
       );
-      return false;
+      return 'exists';
     }
 
     const now = Date.now();
@@ -78,7 +87,30 @@ export class DriverQueueService {
     });
 
     this.logQueueState(id, `Added Trip ${tripId}`);
-    return true;
+    return 'added';
+  }
+
+  addTripToDriver(driverId: string | number, tripId: TripId): boolean {
+    return this.ensureTripInQueue(driverId, tripId) === 'added';
+  }
+
+  /** @deprecated Prefer ensureTripInQueue — kept for call-site compatibility */
+  upsertTripToDriver(
+    driverId: string | number,
+    tripId: TripId,
+  ): QueueTripResult {
+    return this.ensureTripInQueue(driverId, tripId);
+  }
+
+  getQueueEntry(
+    driverId: string | number,
+    tripId: TripId,
+  ): QueueEntry | null {
+    const id = String(driverId);
+    return (
+      this.driverQueues[id]?.find((entry) => tripIdsEqual(entry.tripId, tripId)) ??
+      null
+    );
   }
 
   removeTripFromDriver(driverId: string | number, tripId: TripId): boolean {

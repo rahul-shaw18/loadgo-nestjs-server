@@ -206,3 +206,59 @@ export function extractTripStatus(
 
   return null;
 }
+
+const FARE_FIELDS = [
+  'fare',
+  'updatedFare',
+  'updated_fare',
+  'tripFare',
+  'trip_fare',
+  'amount',
+  'price',
+  'totalFare',
+  'total_fare',
+] as const;
+
+export function extractTripFare(
+  data: unknown,
+  tripId?: TripId,
+): number | string | null {
+  const trips = flattenTripRecords(data);
+  const records =
+    tripId !== undefined
+      ? trips.filter((trip) => {
+          const id = extractTripIdFromRecord(trip);
+          return id !== null && String(id) === String(tripId);
+        })
+      : trips;
+
+  for (const trip of records) {
+    for (const field of FARE_FIELDS) {
+      const raw = trip[field];
+      if (raw === undefined || raw === null || raw === '') {
+        continue;
+      }
+      const asNumber = Number(raw);
+      if (Number.isFinite(asNumber)) {
+        return asNumber;
+      }
+      return String(raw);
+    }
+  }
+
+  return null;
+}
+
+export function extractTripRecord(
+  data: unknown,
+  tripId: TripId,
+): Record<string, unknown> | null {
+  const trips = flattenTripRecords(data);
+  for (const trip of trips) {
+    const id = extractTripIdFromRecord(trip);
+    if (id !== null && String(id) === String(tripId)) {
+      return trip;
+    }
+  }
+  return trips.length === 1 ? trips[0] : null;
+}

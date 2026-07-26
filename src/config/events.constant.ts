@@ -12,6 +12,7 @@ export const EVENTS = {
 
   // ─── User ↔ Server (socket) ────────────────────────────────────────────────
   REGISTER_USER: 'REGISTER_USER',
+  UPDATE_FARE: 'UPDATE_FARE',
 
   // ─── Trip lifecycle (emitted to trip rooms) ─────────────────────────────────
   TRIP_ACCEPTED: 'TRIP_ACCEPTED',
