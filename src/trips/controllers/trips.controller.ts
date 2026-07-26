@@ -117,26 +117,22 @@ export class TripsController {
       return res.json({ ok: true });
     }
 
+    // Each notify is a new offer cycle (including post–fare-update redispatches).
+    // Clear rejection history for this trip so previously rejected drivers can be re-offered.
+    // Drivers who already have this trip queued keep their existing entry unchanged.
+    const alreadyQueued = this.driverQueue.getDriversWithTrip(tripId);
+    this.logger.log(
+      `[notify-new-trip] Trip ${tripId} — new offer cycle` +
+        (alreadyQueued.length > 0
+          ? ` (${alreadyQueued.length} driver(s) already queued; entries left unchanged)`
+          : ''),
+    );
+    this.rejectionCooldown.clearAllForTrip(tripId);
+
     drivers.forEach((driverId) => {
-      if (!this.driverState.canReceiveOffers(driverId)) {
-        this.logger.log(
-          `[notify-new-trip] Skipping driver ${driverId} — on active trip`,
-        );
-        return;
-      }
-
-      if (this.rejectionCooldown.isHidden(driverId, tripId)) {
-        this.logger.log(
-          `[notify-new-trip] Skipping driver ${driverId} — trip ${tripId} in rejection cooldown`,
-        );
-        return;
-      }
-
-      const added = this.driverQueue.addTripToDriver(driverId, tripId);
-
-      if (added && !this.offerManager.hasOffer(driverId)) {
-        this.offerManager.offerNextTrip(io, driverId);
-      }
+      void this.offerManager.dispatchTripToDriver(io, driverId, tripId, {
+        context: 'notify-new-trip',
+      });
     });
 
     return res.json({ ok: true });

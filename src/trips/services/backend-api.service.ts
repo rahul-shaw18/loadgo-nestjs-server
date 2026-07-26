@@ -9,6 +9,7 @@ import {
 import { normalizeTripId, TripId, tripIdKey } from '../utils/trip-id.util';
 import {
   extractActiveTripId as parseActiveTripId,
+  extractTripFare,
   extractTripStatus,
   parseTripStatus,
 } from '../utils/trip-record.util';
@@ -389,5 +390,40 @@ export class BackendApiService {
       `[backend] getLiveTripData (${param}) → status ${status ?? 'unknown'}`,
     );
     return status;
+  }
+
+  async fetchTripOfferSnapshot(tripId: TripId): Promise<{
+    status: number | null;
+    fare: number | string | null;
+  }> {
+    // Bypass status cache so fare updates are visible immediately.
+    this.tripStatusCache.delete(tripIdKey(tripId));
+
+    const param = `id=${encodeURIComponent(String(tripId))}`;
+    const result = await this.request<Record<string, unknown>>(
+      `${BACKEND_ENDPOINTS.GET_LIVE_TRIP}?${param}`,
+      { method: 'GET' },
+    );
+
+    if (!result.ok || !result.data) {
+      this.logger.debug(
+        `[backend] getLiveTripData (${param}) — no response for fare update check`,
+      );
+      return { status: null, fare: null };
+    }
+
+    const status = extractTripStatus(result.data, tripId);
+    const fare = extractTripFare(result.data, tripId);
+
+    if (status !== null) {
+      this.writeCache(this.tripStatusCache, tripIdKey(tripId), status);
+    }
+
+    this.logger.log(
+      `[backend] getLiveTripData (${param}) → status ${status ?? 'unknown'}` +
+        (fare !== null ? `, fare ${fare}` : ''),
+    );
+
+    return { status, fare };
   }
 }

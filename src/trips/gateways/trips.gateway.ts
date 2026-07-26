@@ -265,11 +265,11 @@ export class TripsGateway
       return;
     }
 
-    const added = this.driverQueue.addTripToDriver(driverId, tripId);
-    if (added && !this.offerManager.hasOffer(driverId)) {
+    const result = this.driverQueue.upsertTripToDriver(driverId, tripId);
+    if (!this.offerManager.hasOffer(driverId)) {
       this.offerManager.offerNextTrip(this.server, driverId);
       this.logger.log(
-        `[rejection-cooldown] Trip ${tripIdKey(tripId)} re-queued for driver ${driverId} (status 1)`,
+        `[rejection-cooldown] Trip ${tripIdKey(tripId)} re-queued for driver ${driverId} (status 1, ${result})`,
       );
     }
   }
@@ -1047,6 +1047,102 @@ export class TripsGateway
     }
 
     return false;
+  }
+
+  @SubscribeMessage(EVENTS.UPDATE_FARE)
+  async handleUpdateFare(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    payload: {
+      tripId: number | string;
+      userId?: string | number;
+      drivers?: (string | number)[];
+    },
+  ): Promise<SocketAck> {
+    this.logger.log(
+      `Received ${EVENTS.UPDATE_FARE} from socket ${client.id} with payload: ${JSON.stringify(payload)}`,
+    );
+
+    const tripId = normalizeTripId(payload?.tripId);
+    const userId = this.resolveUserId(client, payload?.userId);
+
+    if (!userId) {
+      return { ok: false, message: 'User not registered' };
+    }
+    if (!tripId) {
+      return { ok: false, message: 'Invalid tripId' };
+    }
+
+    if (this.tripRequestTimeout.isTerminal(tripId)) {
+      return {
+        ok: false,
+        message: 'Trip is no longer eligible for fare updates.',
+        tripId,
+      };
+    }
+
+    const participants = this.tripParticipants.get(tripId);
+    if (
+      participants?.userId !== undefined &&
+      String(participants.userId) !== String(userId)
+    ) {
+      return { ok: false, message: 'User not assigned to this trip', tripId };
+    }
+
+    this.logger.log(
+      `[UPDATE_FARE]\n\nTrip:\n${tripId}\n\nVerifying updated trip with backend...`,
+    );
+
+    // Bypass cache so we see the post-patch status immediately.
+    const snapshot = await this.backendApi.fetchTripOfferSnapshot(tripId);
+
+    if (snapshot.status !== TRIP_STATUS.REQUESTED) {
+      this.logger.warn(
+        `[UPDATE_FARE] Trip ${tripId} not eligible — status ${snapshot.status ?? 'unknown'}`,
+      );
+      return {
+        ok: false,
+        message: 'Trip is no longer eligible for fare updates.',
+        tripId,
+      };
+    }
+
+    this.logger.log(
+      `[UPDATE_FARE]\n\nTrip verified\n\nStatus:\n${snapshot.status}\n\nStarting new offer cycle...`,
+    );
+
+    this.logger.log(
+      `[RejectionCooldown]\n\nClearing rejection history\n\nTrip:\n${tripId}`,
+    );
+    this.rejectionCooldown.clearAllForTrip(tripId);
+
+    this.tripParticipants.setUser(tripId, userId);
+    this.connectionManager.joinUserToTripRoom(this.server, userId, tripId);
+
+    // Drivers already viewing this trip get a fresh INCOMING_TRIP (same payload shape).
+    // Queue entries and background timers are not modified.
+    this.offerManager.reemitActiveOffersForTrip(this.server, tripId);
+
+    const drivers = Array.isArray(payload.drivers) ? payload.drivers : [];
+    if (drivers.length > 0) {
+      this.logger.log(
+        `[UPDATE_FARE]\nRe-running driver matching...\nDrivers: [${drivers.join(', ')}]`,
+      );
+      for (const driverId of drivers) {
+        await this.offerManager.dispatchTripToDriver(
+          this.server,
+          driverId,
+          tripId,
+          { context: 'UPDATE_FARE' },
+        );
+      }
+    }
+
+    return {
+      ok: true,
+      tripId,
+      message: 'Fare update processed successfully.',
+    };
   }
 
   @SubscribeMessage(EVENTS.TRIP_CANCELLED_BY_USER)

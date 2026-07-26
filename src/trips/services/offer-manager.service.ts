@@ -427,6 +427,82 @@ export class OfferManagerService {
     );
   }
 
+  /**
+   * Re-emits INCOMING_TRIP to drivers currently viewing this trip,
+   * without mutating their queue entry or background timer.
+   */
+  reemitActiveOffersForTrip(io: Server, tripId: TripId): void {
+    for (const driverId of this.getDriverIdsWithActiveOfferForTrip(tripId)) {
+      if (!this.driverState.canReceiveOffers(driverId)) {
+        continue;
+      }
+      const entry = this.driverQueue.getQueueEntry(driverId, tripId);
+      if (!entry) {
+        continue;
+      }
+      this.logger.log(
+        `[UPDATE_FARE]\nDriver:\n${driverId}\n\nActive offer for trip ${tripId}\n\nRe-emitting INCOMING_TRIP`,
+      );
+      this.emitIncomingTrip(io, driverId, entry);
+    }
+  }
+
+  /**
+   * Queue / re-offer a trip after fare update redispath.
+   * Existing queue entries are left untouched (no duplicates, no timer changes).
+   * Drivers not yet queued are added and offered if eligible.
+   */
+  async dispatchTripToDriver(
+    io: Server,
+    driverId: string | number,
+    tripId: TripId,
+    options?: { context?: string },
+  ): Promise<'added' | 'exists' | 'skipped'> {
+    const id = String(driverId);
+    const context = options?.context ?? 'dispatch';
+
+    if (!this.driverState.canReceiveOffers(id)) {
+      this.logger.log(
+        `[${context}] Skipping driver ${id} — on active trip`,
+      );
+      return 'skipped';
+    }
+
+    if (this.rejectionCooldown.isHidden(id, tripId)) {
+      this.logger.log(
+        `[${context}] Skipping driver ${id} — trip ${tripId} in rejection cooldown`,
+      );
+      return 'skipped';
+    }
+
+    const result = this.driverQueue.ensureTripInQueue(id, tripId);
+
+    if (result === 'exists') {
+      this.logger.log(
+        `[${context}]\nDriver:\n${id}\n\nTrip already queued\n\nLeaving existing entry unchanged`,
+      );
+
+      const active = this.activeOffers[id];
+      if (active && tripIdsEqual(active.tripId, tripId)) {
+        const entry = this.driverQueue.getQueueEntry(id, tripId);
+        if (entry) {
+          this.emitIncomingTrip(io, id, entry);
+        }
+      }
+      return 'exists';
+    }
+
+    this.logger.log(
+      `[${context}]\nDriver:\n${id}\n\nAdded back after fare update`,
+    );
+
+    if (!this.activeOffers[id]) {
+      await this.advanceToNextOffer(io, id, context);
+    }
+
+    return 'added';
+  }
+
   clearAllOffersForTrip(
     io: Server,
     tripId: TripId,
