@@ -1,7 +1,7 @@
 // ─── Server Configuration ─────────────────────────────────────────────────────
 
 export const BACKEND_BASE_URL =
-  process.env.BACKEND_URL || 'https://loadgo.in/loadgotest/';
+  process.env.BACKEND_URL || 'https://loadgo.in/loadgo/';
 
 /** Optional service JWT for server-to-server PHP API calls */
 export const BACKEND_SERVICE_TOKEN = process.env.BACKEND_SERVICE_TOKEN || '';
