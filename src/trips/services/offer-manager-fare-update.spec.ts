@@ -60,7 +60,7 @@ describe('OfferManagerService — fare update redispath', () => {
     expect(driverQueue.getQueueEntry(72, 1183)?.bgExpireAt).toBe(firstExpire);
     expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
       tripId: 1183,
-      screenTimeout: 30,
+      screenTimeout: 60,
     });
     expect(emit.mock.calls[0][1]).not.toHaveProperty('fare');
   });
@@ -80,7 +80,7 @@ describe('OfferManagerService — fare update redispath', () => {
     expect(result).toBe('added');
     expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
       tripId: 1183,
-      screenTimeout: 30,
+      screenTimeout: 60,
     });
   });
 

@@ -68,7 +68,7 @@ describe('OfferManagerService', () => {
       expect(emit).toHaveBeenCalledTimes(1);
       expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 1009,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
       expect(service.hasOffer(93)).toBe(true);
       expect(driverQueue.getQueueTripIds(93)).toEqual([1009, 1012, 1014]);
@@ -97,7 +97,7 @@ describe('OfferManagerService', () => {
       expect(emit).toHaveBeenCalledTimes(2);
       expect(emit).toHaveBeenLastCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 1012,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
     });
 
@@ -105,7 +105,7 @@ describe('OfferManagerService', () => {
       driverQueue.addTripToDriver(93, 1009);
 
       await service.advanceToNextOffer(io, 93, 'test');
-      await jest.advanceTimersByTimeAsync(30_000);
+      await jest.advanceTimersByTimeAsync(60_000);
 
       expect(tripEventEmitter.emitToTripRoom).toHaveBeenCalledWith(
         io,
@@ -131,7 +131,7 @@ describe('OfferManagerService', () => {
       expect(driverQueue.hasTripInQueue(93, 1009)).toBe(false);
       expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 1012,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
     });
 
@@ -145,7 +145,7 @@ describe('OfferManagerService', () => {
       expect(driverQueue.hasTripInQueue(93, 1046)).toBe(true);
       expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 1046,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
     });
 
@@ -165,7 +165,7 @@ describe('OfferManagerService', () => {
       // null status keeps 1046 and offers it optimistically
       expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 1046,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
       expect(driverQueue.hasTripInQueue(93, 1046)).toBe(true);
     });
@@ -184,7 +184,7 @@ describe('OfferManagerService', () => {
       expect(driverQueue.hasTripInQueue(93, 1046)).toBe(false);
       expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 1047,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
     });
 
@@ -201,13 +201,13 @@ describe('OfferManagerService', () => {
       // thrown validation is treated as optimistic offer for 1046
       expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 1046,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
     });
   });
 
   describe('driver recovery', () => {
-    it('re-emits INCOMING_TRIP with a fresh 30s timer when driver reconnects', async () => {
+    it('re-emits INCOMING_TRIP with a fresh 60s timer when driver reconnects', async () => {
       driverQueue.addTripToDriver(93, 901);
 
       await service.recoverPendingOffersOnRegister(io, 93, 'socket-93');
@@ -215,7 +215,7 @@ describe('OfferManagerService', () => {
       expect(backendApi.fetchTripStatus).toHaveBeenCalledWith(901);
       expect(emit).toHaveBeenCalledWith(EVENTS.INCOMING_TRIP, {
         tripId: 901,
-        screenTimeout: 30,
+        screenTimeout: 60,
       });
       expect(service.hasOfferSentOnSocket('socket-93', 901)).toBe(true);
     });

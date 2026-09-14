@@ -7,7 +7,7 @@ export const BACKEND_BASE_URL =
 export const BACKEND_SERVICE_TOKEN = process.env.BACKEND_SERVICE_TOKEN || '';
 
 // Timer durations (in milliseconds)
-export const SCREEN_TIMER_MS = 30 * 1000; // 30 seconds — time shown on driver screen per trip
+export const SCREEN_TIMER_MS = 60 * 1000; // 60 seconds — time shown on driver screen per trip
 export const BACKGROUND_TIMER_MS = 5 * 60 * 1000; // 5 minutes — total lifetime of a trip in a driver's queue
 export const ROTATION_GAP_MS = 5 * 1000; // 5 seconds — gap between trip rotations
 export const LOCATION_UPDATE_THROTTLE_MS = 1000; // 1 second — max location broadcasts per driver
