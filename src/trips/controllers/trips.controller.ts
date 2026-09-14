@@ -77,7 +77,7 @@ export class TripsController {
     description:
       'Called by the main backend when a new trip is created. ' +
       "Adds the trip to each eligible driver's queue and, if the driver has no active offer, " +
-      'immediately emits an INCOMING_TRIP socket event with a 30-second screen timer.',
+      'immediately emits an INCOMING_TRIP socket event with a 60-second screen timer.',
   })
   @ApiBody({ type: NotifyNewTripDto })
   @ApiResponse({
