@@ -409,7 +409,14 @@ export class TripLifecycleService {
           params.tripId,
           params.broadcastPayload,
           params.context,
-          { userId: params.userId, driverId: assigneeDriverId },
+          {
+            userId: params.userId,
+            driverId: assigneeDriverId,
+            poolDriverIds: this.tripEventEmitter.getTripPoolDriverIds(
+              params.tripId,
+              this.offerManager.getDriverIdsWithActiveOfferForTrip(params.tripId),
+            ),
+          },
         );
       } else {
         this.tripEventEmitter.emitToTripRoom(

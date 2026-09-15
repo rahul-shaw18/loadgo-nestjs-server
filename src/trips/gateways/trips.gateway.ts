@@ -234,7 +234,14 @@ export class TripsGateway
     );
 
     const participants = this.tripParticipants.get(tripId);
-    if (participants?.userId) {
+    if (
+      participants?.userId &&
+      !this.tripEventEmitter.isUserInTripRoom(
+        this.server,
+        tripId,
+        participants.userId,
+      )
+    ) {
       this.tripEventEmitter.emitDirectToUser(
         this.server,
         participants.userId,
@@ -734,6 +741,13 @@ export class TripsGateway
         ...(vehicleNo && { vehicleNo }),
       };
 
+      // Snapshot the offer pool before acceptance clears queues, so the other
+      // drivers holding this trip can still be notified.
+      const poolDriverIds = this.tripEventEmitter.getTripPoolDriverIds(
+        normalizedTripId,
+        this.offerManager.getDriverIdsWithActiveOfferForTrip(normalizedTripId),
+      );
+
       const acceptResult = await this.tripLifecycle.processAcceptLifecycle(
         this.server,
         client,
@@ -759,17 +773,28 @@ export class TripsGateway
       }
 
       const participants = this.tripParticipants.get(normalizedTripId);
-      if (participants?.userId) {
+      if (!participants?.userId) {
+        this.logger.warn(
+          `[accept] No userId registered for trip ${normalizedTripId} — user must rejoin or fetch via HTTP`,
+        );
+      } else if (
+        this.tripEventEmitter.isUserInTripRoom(
+          this.server,
+          normalizedTripId,
+          participants.userId,
+        )
+      ) {
+        // Already delivered through the trip room — a direct emit would duplicate it.
+        this.logger.log(
+          `[accept] User ${participants.userId} already received ${EVENTS.TRIP_ACCEPTED} via trip room`,
+        );
+      } else {
         this.tripEventEmitter.emitDirectToUser(
           this.server,
           participants.userId,
           EVENTS.TRIP_ACCEPTED,
           acceptPayload,
           'socket-accept:fallback',
-        );
-      } else {
-        this.logger.warn(
-          `[accept] No userId registered for trip ${normalizedTripId} — user must rejoin or fetch via HTTP`,
         );
       }
 
@@ -778,6 +803,7 @@ export class TripsGateway
         normalizedTripId,
         driverId,
         'socket-accept',
+        { poolDriverIds },
       );
 
       this.offerManager.clearAllOffersForTrip(

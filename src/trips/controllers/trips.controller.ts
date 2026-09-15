@@ -199,6 +199,12 @@ export class TripsController {
 
       switch (statusCode) {
         case STATUS.ACCEPTED: {
+          // Snapshot the pool before offers are cleared so the other drivers
+          // holding this trip can still be notified.
+          const poolDriverIds = this.tripEventEmitter.getTripPoolDriverIds(
+            tripId,
+            this.offerManager.getDriverIdsWithActiveOfferForTrip(tripId),
+          );
           if (driverId) {
             this.driverState.setOnTrip(driverId, tripId);
             this.acceptanceCache.set({ tripId, driverId });
@@ -219,21 +225,36 @@ export class TripsController {
               tripId,
               driverId,
               'trip-status-update:ACCEPTED',
+              { poolDriverIds },
             );
           }
           this.offerManager.clearAllOffersForTrip(io, tripId, driverId);
           break;
         }
         case STATUS.REVOKED: {
+          const poolDriverIds = this.tripEventEmitter.getTripPoolDriverIds(
+            tripId,
+            this.offerManager.getDriverIdsWithActiveOfferForTrip(tripId),
+          );
           this.driverQueue.removeTripFromAllDrivers(tripId);
           this.offerManager.clearAllOffersForTrip(io, tripId);
           this.acceptanceCache.clear(tripId);
           this.rejectionCooldown.clearAllForTrip(tripId);
-          this.tripEventEmitter.emitGlobally(
+          this.tripEventEmitter.emitToTripRoom(
             io,
+            tripId,
             EVENTS.TRIP_REVOKED,
             { tripId },
             'trip-status-update:REVOKED',
+            { driverId, userId },
+          );
+          this.tripEventEmitter.emitToPoolDrivers(
+            io,
+            tripId,
+            EVENTS.TRIP_REVOKED,
+            { tripId },
+            'trip-status-update:REVOKED',
+            { poolDriverIds, excludeDriverIds: driverId ? [driverId] : [] },
           );
           break;
         }
@@ -265,6 +286,12 @@ export class TripsController {
           break;
         }
         case STATUS.CANCELLED_BY_USER: {
+          // Pool snapshot taken before queues are cleared — drivers still
+          // showing the offer must be told the search ended.
+          const poolDriverIds = this.tripEventEmitter.getTripPoolDriverIds(
+            tripId,
+            this.offerManager.getDriverIdsWithActiveOfferForTrip(tripId),
+          );
           if (driverId) {
             this.driverState.setOnline(driverId);
           }
@@ -275,7 +302,7 @@ export class TripsController {
             tripId,
             { tripId, ...(userId !== undefined && { userId }) },
             'trip-status-update:CANCELLED_BY_USER',
-            { driverId, userId },
+            { driverId, userId, poolDriverIds },
           );
           this.clearTripTrackingState(tripId);
           break;
@@ -291,12 +318,6 @@ export class TripsController {
             { tripId },
             'trip-status-update:CANCELLED_BY_DRIVER',
             { driverId, userId },
-          );
-          this.tripEventEmitter.emitGlobally(
-            io,
-            EVENTS.TRIP_CANCELLED_BY_DRIVER,
-            { tripId },
-            'trip-status-update:CANCELLED_BY_DRIVER',
           );
           this.clearTripTrackingState(tripId);
           break;

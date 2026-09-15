@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Server } from 'socket.io';
 import { ConnectionManagerService } from './connection-manager.service';
 import { TripParticipantsService } from './trip-participants.service';
+import { DriverQueueService } from './driver-queue.service';
 import { EVENTS } from '../../config/events.constant';
 import { TripId, tripIdKey } from '../utils/trip-id.util';
 
@@ -12,6 +13,7 @@ export class TripEventEmitterService {
   constructor(
     private readonly connectionManager: ConnectionManagerService,
     private readonly tripParticipants: TripParticipantsService,
+    private readonly driverQueue: DriverQueueService,
   ) {}
 
   getRoomDebugInfo(io: Server, tripId: TripId): string {
@@ -131,11 +133,83 @@ export class TripEventEmitterService {
     io.to(socketId).emit(event, payload);
   }
 
+  /**
+   * Drivers currently associated with a trip's active offer pool.
+   * The pool is the driver queue — offered drivers only join the trip room
+   * once they accept, so the Socket.IO room can never be used for this.
+   */
+  getTripPoolDriverIds(
+    tripId: TripId,
+    extraDriverIds?: (string | number)[],
+  ): string[] {
+    const pool = new Set(this.driverQueue.getDriversWithTrip(tripId));
+    for (const driverId of extraDriverIds ?? []) {
+      pool.add(String(driverId));
+    }
+    return [...pool];
+  }
+
+  /** Targeted emission to the trip's pool drivers only — never a global broadcast. */
+  emitToPoolDrivers(
+    io: Server,
+    tripId: TripId,
+    event: string,
+    payload: Record<string, unknown>,
+    context: string,
+    options?: {
+      poolDriverIds?: (string | number)[];
+      excludeDriverIds?: (string | number)[];
+    },
+  ): string[] {
+    const excluded = new Set(
+      (options?.excludeDriverIds ?? []).map((id) => String(id)),
+    );
+    const pool = this.getTripPoolDriverIds(tripId, options?.poolDriverIds).filter(
+      (driverId) => !excluded.has(driverId),
+    );
+
+    this.logger.log(
+      `[${context}] Emitting ${event} → pool drivers for trip ${tripIdKey(tripId)}: [${pool.join(', ') || 'none'}]`,
+    );
+
+    for (const driverId of pool) {
+      this.emitDirectToDriver(io, driverId, event, payload, context);
+    }
+
+    return pool;
+  }
+
+  isUserInTripRoom(
+    io: Server,
+    tripId: TripId,
+    userId: string | number,
+  ): boolean {
+    const socketId = this.connectionManager.getUserSocketId(userId);
+    if (!socketId) {
+      return false;
+    }
+    const room = this.connectionManager.tripRoom(tripId);
+    return io.sockets.adapter.rooms.get(room)?.has(socketId) ?? false;
+  }
+
+  /** Resolves the driver that currently owns the trip, if it has been accepted. */
+  private resolveAssigneeDriverId(
+    tripId: TripId,
+    driverId?: string | number,
+  ): string | number | undefined {
+    return driverId ?? this.tripParticipants.get(tripId)?.driverId;
+  }
+
+  /**
+   * Sent to the other drivers that still hold this trip in their offer pool.
+   * Never delivered to the user, and never to unrelated drivers.
+   */
   emitAcceptedByOtherDrivers(
     io: Server,
     tripId: TripId,
     assigneeDriverId: string | number,
     context: string,
+    options?: { poolDriverIds?: (string | number)[] },
   ): void {
     const payload = {
       tripId,
@@ -147,27 +221,34 @@ export class TripEventEmitterService {
       `[TripEvent]\n\nEmitting ${EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER}\n\nTrip:\n${tripIdKey(tripId)}\n\nAssignee driver:\n${assigneeDriverId}`,
     );
 
-    for (const driverId of this.connectionManager.getAllDriverIds()) {
-      if (String(driverId) === String(assigneeDriverId)) {
-        continue;
-      }
-
-      this.emitDirectToDriver(
-        io,
-        driverId,
-        EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER,
-        payload,
-        context,
-      );
-    }
+    this.emitToPoolDrivers(
+      io,
+      tripId,
+      EVENTS.TRIP_ACCEPTED_BY_OTHER_DRIVER,
+      payload,
+      context,
+      {
+        poolDriverIds: options?.poolDriverIds,
+        excludeDriverIds: [assigneeDriverId],
+      },
+    );
   }
 
+  /**
+   * Before acceptance: user + every driver holding the offer.
+   * After acceptance: user + accepted driver only (the trip room already is
+   * exactly those two sockets), so pool drivers are not notified.
+   */
   emitTripCancelledByUser(
     io: Server,
     tripId: TripId,
     payload: Record<string, unknown>,
     context: string,
-    options?: { driverId?: string | number; userId?: string | number },
+    options?: {
+      driverId?: string | number;
+      userId?: string | number;
+      poolDriverIds?: (string | number)[];
+    },
   ): void {
     const enriched = {
       message: 'Trip cancelled by user.',
@@ -175,8 +256,15 @@ export class TripEventEmitterService {
       tripId,
     };
 
+    const assigneeDriverId = this.resolveAssigneeDriverId(
+      tripId,
+      options?.driverId,
+    );
+
     this.logger.log(
-      `[TripEvent]\n\nEmitting ${EVENTS.TRIP_CANCELLED_BY_USER}\n\nTrip:\n${tripIdKey(tripId)}\n\nPayload:\n${JSON.stringify(enriched)}`,
+      `[TripEvent]\n\nEmitting ${EVENTS.TRIP_CANCELLED_BY_USER}\n\nTrip:\n${tripIdKey(tripId)}\n\n` +
+        `Phase: ${assigneeDriverId ? `accepted (driver ${assigneeDriverId})` : 'searching'}\n\n` +
+        `Payload:\n${JSON.stringify(enriched)}`,
     );
 
     this.emitToTripRoom(
@@ -185,21 +273,20 @@ export class TripEventEmitterService {
       EVENTS.TRIP_CANCELLED_BY_USER,
       enriched,
       context,
-      options,
+      { driverId: assigneeDriverId, userId: options?.userId },
     );
 
-    this.emitGlobally(io, EVENTS.TRIP_CANCELLED_BY_USER, enriched, context);
-  }
+    if (assigneeDriverId) {
+      return;
+    }
 
-  emitGlobally(
-    io: Server,
-    event: string,
-    payload: Record<string, unknown>,
-    context: string,
-  ): void {
-    this.logger.log(
-      `[${context}] Global-emit ${event} | payload=${JSON.stringify(payload)}`,
+    this.emitToPoolDrivers(
+      io,
+      tripId,
+      EVENTS.TRIP_CANCELLED_BY_USER,
+      enriched,
+      context,
+      { poolDriverIds: options?.poolDriverIds },
     );
-    io.emit(event, payload);
   }
 }
