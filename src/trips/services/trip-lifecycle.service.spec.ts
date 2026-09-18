@@ -20,7 +20,12 @@ describe('TripLifecycleService', () => {
   let tripParticipants: TripParticipantsService;
   let acceptanceCache: TripAcceptanceCacheService;
   let backendApi: jest.Mocked<Pick<BackendApiService, 'updateTripStatus' | 'fetchTripStatus'>>;
-  let offerManager: jest.Mocked<Pick<OfferManagerService, 'clearAllOffersForTrip'>>;
+  let offerManager: jest.Mocked<
+    Pick<
+      OfferManagerService,
+      'clearAllOffersForTrip' | 'getDriverIdsWithActiveOfferForTrip'
+    >
+  >;
   let lifecycleLock: jest.Mocked<Pick<TripLifecycleLockService, 'tryAcquire' | 'release'>>;
 
   const io = {} as any;
@@ -41,6 +46,7 @@ describe('TripLifecycleService', () => {
 
     offerManager = {
       clearAllOffersForTrip: jest.fn(),
+      getDriverIdsWithActiveOfferForTrip: jest.fn().mockReturnValue([]),
     };
 
     lifecycleLock = {
@@ -59,6 +65,7 @@ describe('TripLifecycleService', () => {
       {
         emitToTripRoom: jest.fn(),
         emitTripCancelledByUser: jest.fn(),
+        getTripPoolDriverIds: jest.fn().mockReturnValue([]),
         getRoomDebugInfo: jest.fn().mockReturnValue('room-debug'),
       } as unknown as TripEventEmitterService,
       backendApi as unknown as BackendApiService,
